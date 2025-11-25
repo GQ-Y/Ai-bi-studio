@@ -13,9 +13,37 @@ import { AlertView } from './components/alert/AlertView';
 import { PatrolView } from './components/patrol/PatrolView';
 import { BroadcastView } from './components/broadcast/BroadcastView';
 import { TechPanel } from './components/ui/TechPanel';
+import { GlobalAlert } from './components/ui/GlobalAlert';
 
 function App() {
-  const { isNavOpen, navPosition, toggleNav, centerMode, setCenterMode, currentView, isEmergency, setEmergency, setCurrentView } = useAppStore();
+  const { isNavOpen, navPosition, toggleNav, centerMode, setCenterMode, currentView, isEmergency, setEmergency, setCurrentView, setAlertNotification } = useAppStore();
+
+  // 模拟随机触发预警 (仅用于演示)
+  useEffect(() => {
+    // 定义一个触发函数，方便测试
+    const triggerDemoAlert = () => {
+      // 只有在没有紧急模式且没有当前预警时才触发，避免太烦
+      setAlertNotification({
+        id: Date.now().toString(),
+        title: '检测到区域入侵异常行为',
+        image: 'demo-alert', // 在组件内部会使用视频流替代
+        source: '2号仓库外围 CAM-05',
+        time: new Date().toLocaleTimeString(),
+        level: Math.random() > 0.5 ? 'high' : 'medium'
+      });
+    };
+
+    // 这里的快捷键用于手动触发演示: Cmd+M
+    const handleDemoKey = (e: KeyboardEvent) => {
+       if ((e.metaKey || e.ctrlKey) && e.key === 'm') {
+         e.preventDefault();
+         triggerDemoAlert();
+       }
+    };
+
+    window.addEventListener('keydown', handleDemoKey);
+    return () => window.removeEventListener('keydown', handleDemoKey);
+  }, [setAlertNotification]);
 
   // 全局快捷键监听
   useEffect(() => {
@@ -64,6 +92,9 @@ function App() {
     <div className="fixed inset-0 bg-tech-bg text-tech-text overflow-hidden font-sans selection:bg-tech-cyan selection:text-tech-bg">
       {/* 侧边导航栏 - 注意 z-index 层级高于 Header */}
       <SideNav />
+      
+      {/* 全局预警弹窗 */}
+      <GlobalAlert />
 
       {/* 动态背景层 (由于主内容位移，背景最好固定) */}
       <div className="fixed inset-0 pointer-events-none z-0">

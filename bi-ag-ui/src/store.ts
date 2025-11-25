@@ -4,6 +4,15 @@ export type CenterMode = 'video-grid' | 'ai-chat' | 'map';
 export type NavPosition = 'left' | 'top';
 export type PageView = 'dashboard' | 'monitor' | 'alert' | 'patrol' | 'broadcast';
 
+export interface AlertNotification {
+  id: string;
+  title: string;
+  image: string;
+  source: string;
+  time: string;
+  level: 'high' | 'medium' | 'low';
+}
+
 interface AppState {
   // 页面导航状态
   currentView: PageView;
@@ -25,6 +34,10 @@ interface AppState {
   // 紧急模式
   isEmergency: boolean;
   setEmergency: (active: boolean) => void;
+
+  // 全局预警通知
+  alertNotification: AlertNotification | null;
+  setAlertNotification: (alert: AlertNotification | null) => void;
 }
 
 export const useAppStore = create<AppState>((set) => ({
@@ -43,5 +56,7 @@ export const useAppStore = create<AppState>((set) => ({
 
   isEmergency: false,
   setEmergency: (active) => set({ isEmergency: active }),
-}));
 
+  alertNotification: null,
+  setAlertNotification: (alert) => set({ alertNotification: alert }),
+}));
