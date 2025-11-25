@@ -14,6 +14,7 @@ import { PatrolView } from './components/patrol/PatrolView';
 import { BroadcastView } from './components/broadcast/BroadcastView';
 import { TechPanel } from './components/ui/TechPanel';
 import { GlobalAlert } from './components/ui/GlobalAlert';
+import { GuideOverlay } from './components/ui/GuideOverlay';
 
 function App() {
   const { isNavOpen, navPosition, toggleNav, centerMode, setCenterMode, currentView, isEmergency, setEmergency, setCurrentView, setAlertNotification } = useAppStore();
@@ -95,6 +96,9 @@ function App() {
       
       {/* 全局预警弹窗 */}
       <GlobalAlert />
+
+      {/* 新手引导层 */}
+      <GuideOverlay />
 
       {/* 动态背景层 (由于主内容位移，背景最好固定) */}
       <div className="fixed inset-0 pointer-events-none z-0">

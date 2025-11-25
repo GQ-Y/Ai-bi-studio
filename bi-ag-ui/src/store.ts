@@ -51,6 +51,10 @@ interface AppState {
   // 监控轮巡配置
   patrolConfig: PatrolConfig;
   setPatrolConfig: (config: Partial<PatrolConfig>) => void;
+  
+  // 引导层状态
+  hasSeenGuide: boolean;
+  setHasSeenGuide: (hasSeen: boolean) => void;
 }
 
 export const useAppStore = create<AppState>()(
@@ -85,6 +89,9 @@ export const useAppStore = create<AppState>()(
       setPatrolConfig: (config) => set((state) => ({
         patrolConfig: { ...state.patrolConfig, ...config }
       })),
+      
+      hasSeenGuide: false,
+      setHasSeenGuide: (hasSeen) => set({ hasSeenGuide: hasSeen }),
     }),
     {
       name: 'bi-agent-storage', // 本地存储的 key
@@ -95,6 +102,7 @@ export const useAppStore = create<AppState>()(
         navPosition: state.navPosition,
         centerMode: state.centerMode,
         patrolConfig: state.patrolConfig,
+        hasSeenGuide: state.hasSeenGuide,
       }),
     }
   )
