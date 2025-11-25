@@ -52,6 +52,7 @@ function App() {
       // Cmd+K / Ctrl+K -> AI Chat
       if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
         e.preventDefault();
+        setCurrentView('dashboard');
         setCenterMode(centerMode === 'ai-chat' ? 'video-grid' : 'ai-chat');
       }
       // Cmd+O / Ctrl+O -> Side Nav
