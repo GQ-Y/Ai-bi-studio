@@ -9,6 +9,7 @@ import { useAppStore } from './store';
 import { Sparkles, Map, Grid3X3 } from 'lucide-react';
 import { CameraTree } from './components/monitor/CameraTree';
 import { MonitorGrid } from './components/monitor/MonitorGrid';
+import { AlertView } from './components/alert/AlertView';
 import { TechPanel } from './components/ui/TechPanel';
 
 function App() {
@@ -134,9 +135,22 @@ function App() {
                 </div>
               </motion.div>
             )}
+
+            {/* 3. 预警中心 (Alert) */}
+            {currentView === 'alert' && (
+              <motion.div
+                key="alert"
+                initial={{ opacity: 0, scale: 0.95 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.95 }}
+                className="h-full w-full"
+              >
+                <AlertView />
+              </motion.div>
+            )}
             
-            {/* 3. 其他页面占位 */}
-            {['alert', 'patrol', 'broadcast'].includes(currentView) && (
+            {/* 4. 其他页面占位 */}
+            {['patrol', 'broadcast'].includes(currentView) && (
               <motion.div 
                 key="placeholder"
                 initial={{ opacity: 0 }}
