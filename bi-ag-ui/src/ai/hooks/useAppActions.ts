@@ -25,6 +25,12 @@ export const useAppActions = () => {
       }
     ],
     handler: async ({ page }) => {
+      // Validate input
+      if (!page || typeof page !== 'string') {
+        console.error('[AI Action] Invalid page parameter:', page);
+        return 'Error: Invalid page parameter.';
+      }
+      
       // Normalize input: lowercase and remove extra spaces/hyphens
       const normalizedPage = page.toLowerCase().replace(/\s+/g, '').replace(/-/g, '');
       
@@ -67,6 +73,12 @@ export const useAppActions = () => {
       }
     ],
     handler: async ({ mode }) => {
+      // Validate input
+      if (!mode || typeof mode !== 'string') {
+        console.error('[AI Action] Invalid mode parameter:', mode);
+        return 'Error: Invalid mode parameter.';
+      }
+      
       setCurrentView('dashboard'); // Ensure we are on dashboard
       
       const normalizedMode = mode.toLowerCase();

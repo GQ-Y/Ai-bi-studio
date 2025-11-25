@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { useCopilotChat } from "@copilotkit/react-core";
 import { Role, TextMessage } from "@copilotkit/runtime-client-gql";
 import { Send, X, User, Bot, Sparkles } from 'lucide-react';
@@ -6,13 +6,10 @@ import { motion, AnimatePresence } from 'framer-motion';
 
 export const CustomChatWidget = () => {
   const [isOpen, setIsOpen] = useState(false);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
   
   // 使用 CopilotKit 的核心 Chat Hook
-  const { visibleMessages, appendMessage, isLoading } = useCopilotChat({
-    labels: {
-      initial: "我是您的智能驾驶舱助手，接入了 Qwen-VL 视觉大模型。您可以让我控制大屏、分析数据或查看监控。",
-    },
-  });
+  const { visibleMessages, appendMessage, isLoading } = useCopilotChat();
 
   const [inputValue, setInputValue] = useState('');
 
@@ -22,7 +19,6 @@ export const CustomChatWidget = () => {
     const content = inputValue;
     setInputValue('');
     
-    // Explicitly construct the message object to avoid potential internal inference issues
     await appendMessage(new TextMessage({
       role: Role.User,
       content: content,
@@ -36,12 +32,65 @@ export const CustomChatWidget = () => {
     }
   };
 
-  // Helper to safely render message content
-  const renderMessageContent = (msg: any) => {
-    if (typeof msg.content === 'string') return msg.content;
-    // Handle case where content might be an array or object (though typically string for TextMessage)
-    return JSON.stringify(msg.content);
+  // Auto-scroll to bottom when new messages arrive
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [visibleMessages, isLoading]);
+
+  // Process message content: hide thinking process and clean up
+  const processMessageContent = (content: string): string => {
+    // Remove <details> tags and their content (thinking process)
+    // Handle both HTML tags and escaped/plain text tags
+    const processed = content
+      .replace(/<details[\s\S]*?<\/details>/gi, '') // Remove HTML details tags
+      .replace(/&lt;details&gt;[\s\S]*?&lt;\/details&gt;/gi, '') // Remove escaped HTML
+      .replace(/\n<details>\s*<summary>.*?<\/summary>[\s\S]*?<\/details>\s*/gi, '') // Remove plain text with newlines
+      .replace(/<details>\s*<summary>.*?<\/summary>[\s\S]*?<\/details>/gi, ''); // Remove plain text inline
+    
+    // If content is empty or only whitespace after removing thinking
+    if (!processed.trim()) {
+      return ''; // Will trigger "thinking" display
+    }
+    
+    return processed.trim();
   };
+
+  // Filter and deduplicate messages
+  const displayMessages = React.useMemo(() => {
+    const seen = new Set<string>();
+    const filtered: any[] = [];
+    
+    for (const msg of visibleMessages) {
+      const msgAny = msg as any;
+      
+      // Safely extract content
+      const content = msgAny.content 
+        ? (typeof msgAny.content === 'string' ? msgAny.content : JSON.stringify(msgAny.content))
+        : '';
+      
+      const isUser = msgAny.role === Role.User || msgAny.role === 'user';
+      
+      // Create unique key for deduplication
+      const key = `${msgAny.role}-${content.substring(0, Math.min(50, content.length))}`;
+      
+      if (!seen.has(key)) {
+        seen.add(key);
+        
+        // For assistant messages, check if there's actual content (not just thinking)
+        if (!isUser) {
+          const processed = processMessageContent(content);
+          // Only add if has real content or is an error message
+          if (processed || content.includes('Error') || content.includes('错误')) {
+            filtered.push(msg);
+          }
+        } else {
+          filtered.push(msg);
+        }
+      }
+    }
+    
+    return filtered;
+  }, [visibleMessages]);
 
   return (
     <>
@@ -71,7 +120,7 @@ export const CustomChatWidget = () => {
             <div className="p-4 border-b border-white/10 flex items-center justify-between bg-white/5">
               <div className="flex items-center gap-3">
                 <div className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
-                <span className="font-bold text-tech-cyan tracking-wider">QWEN-VL AGENT</span>
+                <span className="font-bold text-tech-cyan tracking-wider">智能安防助手</span>
               </div>
               <button 
                 onClick={() => setIsOpen(false)}
@@ -82,14 +131,27 @@ export const CustomChatWidget = () => {
             </div>
 
             {/* Messages Area */}
-            <div className="flex-1 overflow-y-auto p-4 space-y-6 scrollbar-thin scrollbar-thumb-tech-cyan/20 scrollbar-track-transparent">
-              {visibleMessages.map((msg, idx) => {
-                 // Safely determine role
-                 const isUser = msg.role === Role.User || msg.role === 'user';
+            <div className="flex-1 overflow-y-auto p-4 space-y-4 scrollbar-thin scrollbar-thumb-tech-cyan/20 scrollbar-track-transparent">
+              {displayMessages.map((msg, idx) => {
+                 const msgAny = msg as any;
+                 const isUser = msgAny.role === Role.User || msgAny.role === 'user';
+                 
+                 // Safely extract content with fallback
+                 const content = msgAny.content 
+                   ? (typeof msgAny.content === 'string' ? msgAny.content : JSON.stringify(msgAny.content))
+                   : '';
+                 
+                 const displayContent = isUser ? content : processMessageContent(content);
+                 
+                 // Generate stable key
+                 const messageKey = `${msgAny.id || idx}-${msgAny.role}`;
                  
                  return (
-                  <div 
-                    key={idx} 
+                  <motion.div 
+                    key={messageKey}
+                    initial={{ opacity: 0, y: 10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ duration: 0.2 }}
                     className={`flex gap-3 ${isUser ? 'flex-row-reverse' : 'flex-row'}`}
                   >
                     <div className={`
@@ -109,24 +171,34 @@ export const CustomChatWidget = () => {
                         : 'bg-slate-800/50 border-white/10 text-slate-200 rounded-tl-none'
                       }
                     `}>
-                      {renderMessageContent(msg)}
+                      {displayContent}
                     </div>
-                  </div>
+                  </motion.div>
                 );
               })}
               
+              {/* Loading indicator - only show when loading and no partial content yet */}
               {isLoading && (
-                <div className="flex gap-3">
+                <motion.div 
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  className="flex gap-3"
+                >
                    <div className="w-8 h-8 rounded-full bg-tech-cyan/20 border border-tech-cyan flex items-center justify-center shrink-0">
                      <Bot size={14} className="text-tech-cyan" />
                    </div>
-                   <div className="bg-slate-800/50 border border-white/10 p-3 rounded-xl rounded-tl-none flex gap-1 items-center">
-                     <div className="w-2 h-2 bg-tech-cyan rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-                     <div className="w-2 h-2 bg-tech-cyan rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-                     <div className="w-2 h-2 bg-tech-cyan rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+                   <div className="bg-slate-800/50 border border-white/10 px-4 py-3 rounded-xl rounded-tl-none flex items-center gap-2 text-slate-400 text-sm">
+                     <span>正在思考</span>
+                     <div className="flex gap-1">
+                       <div className="w-1.5 h-1.5 bg-tech-cyan rounded-full animate-bounce" style={{ animationDelay: '0ms', animationDuration: '1s' }} />
+                       <div className="w-1.5 h-1.5 bg-tech-cyan rounded-full animate-bounce" style={{ animationDelay: '200ms', animationDuration: '1s' }} />
+                       <div className="w-1.5 h-1.5 bg-tech-cyan rounded-full animate-bounce" style={{ animationDelay: '400ms', animationDuration: '1s' }} />
+                     </div>
                    </div>
-                </div>
+                </motion.div>
               )}
+              
+              <div ref={messagesEndRef} />
             </div>
 
             {/* Input Area */}

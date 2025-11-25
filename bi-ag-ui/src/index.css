@@ -52,3 +52,97 @@ body {
   background-color: rgba(255,255,255,0.1);
   border-radius: 4px;
 }
+
+/* ============================================
+   CopilotKit 样式覆盖 - 使用更高权重选择器
+   ============================================ */
+
+/* 1. 强制覆盖消息气泡背景，使其透明或适应主题，避免遮挡详情背景 */
+.copilotKitMessage {
+  /* 尝试移除默认背景，如果 CopilotKit 使用了特定类名，这里可能需要调整 */
+  /* background: transparent !important; */
+}
+
+/* 2. 针对 Markdown 内容中的 details/summary 进行样式定制 */
+/* 使用 :global 或更通用的选择器以防 Scoped CSS 限制，但在全局 CSS 文件中通常不需要 :global */
+
+/* 确保选择器权重足够高，覆盖 CopilotKit 内置样式 */
+.copilotKitPopup details,
+.copilotKitSidebar details,
+.copilotKitWindow details,
+div[class*="copilot"] details { 
+  margin: 0.75rem 0;
+  padding: 0.5rem;
+  background-color: rgba(15, 23, 42, 0.6) !important; /* 深色背景 */
+  border-radius: 0.5rem;
+  border: 1px solid rgba(56, 189, 248, 0.2); /* 淡蓝色边框 */
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+  transition: all 0.2s ease;
+}
+
+.copilotKitPopup summary,
+.copilotKitSidebar summary,
+.copilotKitWindow summary,
+div[class*="copilot"] summary {
+  cursor: pointer;
+  font-size: 0.85rem;
+  color: var(--color-tech-primary, #38bdf8) !important;
+  font-weight: 600;
+  opacity: 0.9;
+  user-select: none;
+  list-style: none; /* 移除默认三角，如果需要自定义 */
+  display: flex;
+  align-items: center;
+  padding: 0.25rem 0.5rem;
+  border-radius: 0.25rem;
+}
+
+/* 悬停效果 */
+.copilotKitPopup summary:hover,
+.copilotKitSidebar summary:hover,
+.copilotKitWindow summary:hover,
+div[class*="copilot"] summary:hover {
+  background-color: rgba(56, 189, 248, 0.1);
+  opacity: 1;
+}
+
+/* 自定义展开箭头 (可选) */
+.copilotKitPopup summary::before,
+.copilotKitSidebar summary::before,
+.copilotKitWindow summary::before,
+div[class*="copilot"] summary::before {
+  content: "▶";
+  display: inline-block;
+  margin-right: 0.5rem;
+  font-size: 0.7rem;
+  transition: transform 0.2s ease;
+}
+
+.copilotKitPopup details[open] summary::before,
+.copilotKitSidebar details[open] summary::before,
+.copilotKitWindow details[open] summary::before,
+div[class*="copilot"] details[open] summary::before {
+  transform: rotate(90deg);
+}
+
+/* 展开后的内容区域 */
+.copilotKitPopup details > *:not(summary),
+.copilotKitSidebar details > *:not(summary),
+.copilotKitWindow details > *:not(summary),
+div[class*="copilot"] details > *:not(summary) {
+  font-size: 0.85rem;
+  color: #94a3b8 !important; /* 浅灰色文本 */
+  line-height: 1.6;
+  padding: 0.75rem 0.5rem 0.25rem 1.5rem; /* 增加左内边距 */
+  border-left: 1px dashed rgba(148, 163, 184, 0.3);
+  margin-top: 0.5rem;
+  margin-left: 0.3rem;
+  white-space: pre-wrap; /* 保持换行 */
+}
+
+/* 隐藏原生三角（针对不同浏览器） */
+.copilotKitPopup summary::-webkit-details-marker,
+.copilotKitSidebar summary::-webkit-details-marker,
+div[class*="copilot"] summary::-webkit-details-marker {
+  display: none;
+}
