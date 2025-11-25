@@ -56,9 +56,13 @@ function App() {
     ? 'navClosed' 
     : navPosition === 'left' ? 'navOpenLeft' : 'navOpenTop';
 
+  // 当顶部导航激活时，标题栏需要留出空间（或者融合）
+  // 这里我们通过调整标题栏的 z-index 或位置来处理融合
+  const isTopNav = isNavOpen && navPosition === 'top';
+
   return (
     <div className="fixed inset-0 bg-tech-bg text-tech-text overflow-hidden font-sans selection:bg-tech-cyan selection:text-tech-bg">
-      {/* 侧边导航栏 */}
+      {/* 侧边导航栏 - 注意 z-index 层级高于 Header */}
       <SideNav />
 
       {/* 动态背景层 (由于主内容位移，背景最好固定) */}
@@ -73,7 +77,7 @@ function App() {
         animate={currentVariant}
         transition={{ type: "spring", stiffness: 300, damping: 30 }}
       >
-        {/* 顶部标题 */}
+        {/* 顶部标题 - 当顶部导航存在时， Header 内部会处理融合逻辑 */}
         <Header />
 
         {/* 主内容区 - 根据 currentView 切换 */}

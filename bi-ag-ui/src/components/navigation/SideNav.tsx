@@ -30,6 +30,9 @@ export const SideNav: React.FC = () => {
 
   if (!isNavOpen) return null;
 
+  // 优化顶部导航栏的布局
+  const topNavClasses = "top-4 left-1/2 -translate-x-1/2 h-14 rounded-full border bg-slate-900/90 backdrop-blur-md flex items-center px-4 shadow-2xl border-white/20 z-40";
+
   return (
     <motion.div
       initial="closed"
@@ -37,10 +40,10 @@ export const SideNav: React.FC = () => {
       variants={isLeft ? variants.left : variants.top}
       transition={{ type: "spring", stiffness: 300, damping: 30 }}
       className={twMerge(
-        "fixed z-[60] backdrop-blur-xl border-white/10 transition-all duration-300",
+        "fixed z-[60] transition-all duration-300",
         isLeft 
-          ? "left-4 top-24 bottom-4 w-64 rounded-2xl border bg-slate-900/90 shadow-2xl flex flex-col" 
-          : "top-6 right-8 h-12 rounded-full border bg-slate-900/80 flex items-center px-2 shadow-lg"
+          ? "left-4 top-24 bottom-4 w-64 rounded-2xl border border-white/10 bg-slate-900/90 backdrop-blur-xl shadow-2xl flex flex-col" 
+          : topNavClasses
       )}
     >
       {/* Logo Area (Only for Left) */}
@@ -68,11 +71,11 @@ export const SideNav: React.FC = () => {
                 isActive 
                   ? "bg-blue-600/20 border-blue-500/30" 
                   : "hover:bg-white/5 hover:border-white/10",
-                !isLeft && "py-1.5 px-3 rounded-full text-sm"
+                !isLeft && "py-2 px-4 rounded-full text-sm"
               )}
             >
-              <item.icon size={isLeft ? 20 : 16} className={twMerge(item.color, isActive && "scale-110 drop-shadow-[0_0_5px_currentColor]")} />
-              <span className={twMerge("font-medium transition-colors", isActive ? "text-white" : "text-slate-400 group-hover:text-slate-200", !isLeft && "whitespace-nowrap")}>
+              <item.icon size={isLeft ? 20 : 18} className={twMerge(item.color, isActive && "scale-110 drop-shadow-[0_0_5px_currentColor]")} />
+              <span className={twMerge("font-medium transition-colors", isActive ? "text-white shadow-text" : "text-slate-400 group-hover:text-slate-200", !isLeft && "whitespace-nowrap text-base")} style={{ textShadow: isActive ? '0 0 10px rgba(255,255,255,0.3)' : 'none' }}>
                 {item.label}
               </span>
               
