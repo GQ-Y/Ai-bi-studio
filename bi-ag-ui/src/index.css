@@ -1,100 +1,81 @@
 @import "tailwindcss";
 
 @theme {
-  /* 定义科技感主题色板 - Tailwind v4 会自动生成 bg-tech-bg, text-tech-alert 等类名 */
-  --color-tech-bg: #050b14;
-  --color-tech-panel: rgba(13, 24, 48, 0.7);
-  --color-tech-panel-border: #1e3a8a;
-  --color-tech-blue: #3b82f6;
-  --color-tech-cyan: #06b6d4;
-  --color-tech-glow: #00f0ff;
-  --color-tech-alert: #ef4444;
-  --color-tech-warning: #f59e0b;
-  --color-tech-success: #10b981;
-  --color-tech-text: #f1f5f9;
-  --color-tech-text-dim: #94a3b8;
+  /* 赛博朋克/全息指挥舱配色 */
+  --color-cyber-bg: #030014;
+  --color-cyber-panel: rgba(10, 10, 30, 0.6);
+  --color-cyber-primary: #00f0ff;
+  --color-cyber-secondary: #7000ff;
+  --color-cyber-accent: #ff003c;
+  
+  --color-ui-border: rgba(0, 240, 255, 0.3);
+  --color-ui-glow: rgba(0, 240, 255, 0.5);
 
-  /* 自定义背景图 */
-  --background-image-tech-grid: linear-gradient(rgba(30, 58, 138, 0.1) 1px, transparent 1px), linear-gradient(90deg, rgba(30, 58, 138, 0.1) 1px, transparent 1px);
+  /* 复杂背景 */
+  --background-image-cyber-grid: 
+    linear-gradient(0deg, transparent 24%, rgba(0, 240, 255, .05) 25%, rgba(0, 240, 255, .05) 26%, transparent 27%, transparent 74%, rgba(0, 240, 255, .05) 75%, rgba(0, 240, 255, .05) 76%, transparent 77%, transparent),
+    linear-gradient(90deg, transparent 24%, rgba(0, 240, 255, .05) 25%, rgba(0, 240, 255, .05) 26%, transparent 27%, transparent 74%, rgba(0, 240, 255, .05) 75%, rgba(0, 240, 255, .05) 76%, transparent 77%, transparent);
 
-  /* 扩展动画 */
-  --animate-scan: scan 2s linear infinite;
-  --animate-grid-fade: gridFade 3s ease-in-out infinite alternate;
-  --animate-slide-right: slideRight 0.8s cubic-bezier(0.16, 1, 0.3, 1) forwards;
-  --animate-slide-left: slideLeft 0.8s cubic-bezier(0.16, 1, 0.3, 1) forwards;
-  --animate-zoom-in: zoomIn 0.8s cubic-bezier(0.16, 1, 0.3, 1) forwards;
-
-  @keyframes scan {
-    0% { top: 0%; opacity: 0; }
-    10% { opacity: 1; }
-    90% { opacity: 1; }
-    100% { top: 100%; opacity: 0; }
+  /* 动画 */
+  --animate-hologram: hologram 3s infinite linear;
+  --animate-border-flow: borderFlow 2s infinite linear;
+  --animate-spin-slow: spin 20s linear infinite;
+  
+  @keyframes hologram {
+    0% { opacity: 0.5; transform: skewX(0deg); }
+    5% { opacity: 0.7; transform: skewX(-2deg); }
+    10% { opacity: 0.6; transform: skewX(1deg); }
+    15% { opacity: 0.8; transform: skewX(0deg); }
+    100% { opacity: 0.5; }
   }
 
-  @keyframes gridFade {
-    from { opacity: 0.1; }
-    to { opacity: 0.3; }
-  }
-
-  @keyframes slideRight {
-    from { transform: translateX(-50px); opacity: 0; }
-    to { transform: translateX(0); opacity: 1; }
-  }
-
-  @keyframes slideLeft {
-    from { transform: translateX(50px); opacity: 0; }
-    to { transform: translateX(0); opacity: 1; }
-  }
-
-  @keyframes zoomIn {
-    from { transform: scale(0.95); opacity: 0; }
-    to { transform: scale(1); opacity: 1; }
+  @keyframes borderFlow {
+    0% { background-position: 0% 50%; }
+    100% { background-position: 100% 50%; }
   }
 }
 
-/* 基础样式重置与全局设置 */
 :root {
   color-scheme: dark;
 }
 
 body {
-  background-color: var(--color-tech-bg);
-  color: var(--color-tech-text);
+  background-color: var(--color-cyber-bg);
+  color: #e0f2fe;
+  font-family: 'Rajdhani', 'Orbitron', system-ui, sans-serif; /* 建议引入 Google Fonts */
   overflow: hidden;
-  margin: 0;
-  font-family: 'Inter', system-ui, -apple-system, sans-serif;
 }
 
-/* 自定义滚动条 */
-::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+/* 全局扫描线 */
+.scanlines {
+  background: linear-gradient(
+    to bottom,
+    rgba(255,255,255,0),
+    rgba(255,255,255,0) 50%,
+    rgba(0,0,0,0.2) 50%,
+    rgba(0,0,0,0.2)
+  );
+  background-size: 100% 4px;
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  pointer-events: none;
+  z-index: 999;
+  opacity: 0.3;
 }
 
-::-webkit-scrollbar-track {
-  background-color: var(--color-tech-bg);
+/* 异形切角 */
+.clip-tech-corner {
+  clip-path: polygon(
+    10px 0, 100% 0, 
+    100% calc(100% - 10px), calc(100% - 10px) 100%, 
+    0 100%, 0 10px
+  );
 }
 
-::-webkit-scrollbar-thumb {
-  background-color: var(--color-tech-panel-border);
-  border-radius: 0.25rem;
-}
-
-::-webkit-scrollbar-thumb:hover {
-  background-color: var(--color-tech-blue);
-}
-
-/* 实用工具类 */
-@utility text-shadow-glow {
-  text-shadow: 0 0 10px rgba(59, 130, 246, 0.5);
-}
-
-@utility custom-scrollbar {
-  &::-webkit-scrollbar {
-    width: 4px;
-  }
-  &::-webkit-scrollbar-thumb {
-    background-color: rgba(30, 58, 138, 0.5);
-    border-radius: 2px;
-  }
+.clip-tech-header {
+  clip-path: polygon(
+    0 0, 100% 0, 
+    100% 70%, 95% 100%, 
+    5% 100%, 0 70%
+  );
 }

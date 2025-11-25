@@ -1,53 +1,122 @@
-import React from 'react';
+import React, { useEffect } from 'react';
+import { motion } from 'framer-motion';
 import { Header } from './components/dashboard/Header';
 import { LeftColumn } from './components/dashboard/LeftColumn';
 import { RightColumn } from './components/dashboard/RightColumn';
-import { CenterMap } from './components/dashboard/CenterMap';
-import { Sparkles } from 'lucide-react';
+import { CenterPanel } from './components/dashboard/CenterPanel';
+import { SideNav } from './components/navigation/SideNav';
+import { useAppStore } from './store';
+import { Sparkles, Map, Grid3X3 } from 'lucide-react';
 
 function App() {
+  const { isNavOpen, navPosition, toggleNav, centerMode, setCenterMode } = useAppStore();
+
+  // 全局快捷键监听
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Cmd+K / Ctrl+K -> AI Chat
+      if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+        e.preventDefault();
+        setCenterMode(centerMode === 'ai-chat' ? 'video-grid' : 'ai-chat');
+      }
+      // Cmd+O / Ctrl+O -> Side Nav
+      if ((e.metaKey || e.ctrlKey) && e.key === 'o') {
+        e.preventDefault();
+        toggleNav();
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [centerMode, toggleNav, setCenterMode]);
+
+  // 计算主内容的位移
+  const mainVariants = {
+    navOpenLeft: { x: 240, width: "calc(100vw - 240px)" },
+    navOpenTop: { y: 80, height: "calc(100vh - 80px)" },
+    navClosed: { x: 0, y: 0, width: "100vw", height: "100vh" },
+  };
+
+  const currentVariant = !isNavOpen 
+    ? 'navClosed' 
+    : navPosition === 'left' ? 'navOpenLeft' : 'navOpenTop';
+
   return (
-    <div className="min-h-screen w-full bg-tech-bg text-tech-text flex flex-col overflow-hidden font-sans selection:bg-tech-cyan selection:text-tech-bg">
-      {/* 背景装饰 */}
+    <div className="fixed inset-0 bg-tech-bg text-tech-text overflow-hidden font-sans selection:bg-tech-cyan selection:text-tech-bg">
+      {/* 侧边导航栏 */}
+      <SideNav />
+
+      {/* 动态背景层 (由于主内容位移，背景最好固定) */}
       <div className="fixed inset-0 pointer-events-none z-0">
-         <div className="absolute top-0 left-0 w-full h-full bg-[url('https://grainy-gradients.vercel.app/noise.svg')] opacity-[0.03]"></div>
-         <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-tech-blue/10 blur-[100px] rounded-full"></div>
-         <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] bg-tech-cyan/10 blur-[100px] rounded-full"></div>
+         <div className="absolute inset-0 bg-tech-pattern opacity-20"></div>
+         <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_50%,rgba(34,211,238,0.03),transparent_70%)]"></div>
       </div>
 
-      {/* 顶部标题 */}
-      <Header />
+      {/* 主界面容器 (受 Sidebar 推挤) */}
+      <motion.div
+        className="relative flex flex-col h-screen w-screen"
+        animate={currentVariant}
+        transition={{ type: "spring", stiffness: 300, damping: 30 }}
+      >
+        {/* 顶部标题 */}
+        <Header />
 
-      {/* 主内容区 */}
-      <main className="flex-1 flex gap-4 p-4 pt-0 overflow-hidden relative z-10">
-        {/* 左侧面板 */}
-        <div className="w-[450px] shrink-0 flex flex-col h-full animate-slide-right">
-          <LeftColumn />
-        </div>
+        {/* 主内容区 */}
+        <main className="flex-1 flex gap-4 p-4 pt-0 overflow-hidden relative z-10">
+          {/* 左侧面板 */}
+          <div className="w-[400px] shrink-0 flex flex-col h-full animate-slide-right z-20">
+            <LeftColumn />
+          </div>
 
-        {/* 中间地图/视频区 */}
-        <div className="flex-1 h-full min-w-0 flex flex-col animate-zoom-in">
-          <CenterMap />
-        </div>
+          {/* 中间多模态区 */}
+          <div className="flex-1 h-full min-w-0 flex flex-col animate-zoom-in z-10">
+            <CenterPanel />
+            
+            {/* 底部模式切换条 */}
+            <div className="mt-2 flex justify-center gap-4">
+               <ModeButton 
+                 active={centerMode === 'video-grid'} 
+                 onClick={() => setCenterMode('video-grid')} 
+                 icon={Grid3X3} label="监控墙" 
+               />
+               <ModeButton 
+                 active={centerMode === 'map'} 
+                 onClick={() => setCenterMode('map')} 
+                 icon={Map} label="数字地图" 
+               />
+               <ModeButton 
+                 active={centerMode === 'ai-chat'} 
+                 onClick={() => setCenterMode('ai-chat')} 
+                 icon={Sparkles} label="AI 助手" 
+                 highlight
+               />
+            </div>
+          </div>
 
-        {/* 右侧面板 */}
-        <div className="w-[450px] shrink-0 flex flex-col h-full animate-slide-left">
-          <RightColumn />
-        </div>
-      </main>
-
-      {/* AI 助手悬浮按钮 (占位符) */}
-      <div className="fixed bottom-6 right-6 z-50 group">
-        <button className="relative flex items-center justify-center w-14 h-14 bg-tech-blue/90 hover:bg-tech-blue text-white rounded-full shadow-[0_0_20px_rgba(59,130,246,0.5)] transition-all hover:scale-110 active:scale-95">
-          <Sparkles size={24} className="animate-pulse" />
-          <div className="absolute inset-0 rounded-full border border-white/30 animate-[ping_2s_linear_infinite]"></div>
-        </button>
-        <div className="absolute bottom-full right-0 mb-2 px-3 py-1 bg-tech-panel border border-tech-panel-border text-xs text-tech-cyan whitespace-nowrap rounded opacity-0 group-hover:opacity-100 transition-opacity">
-          Cmd+K 唤醒 AI 助手
-        </div>
-      </div>
+          {/* 右侧面板 */}
+          <div className="w-[400px] shrink-0 flex flex-col h-full animate-slide-left z-20">
+            <RightColumn />
+          </div>
+        </main>
+      </motion.div>
     </div>
   );
 }
+
+const ModeButton = ({ active, onClick, icon: Icon, label, highlight }: any) => (
+  <button 
+    onClick={onClick}
+    className={`
+      flex items-center gap-2 px-4 py-1.5 rounded-full border transition-all
+      ${active 
+        ? 'bg-tech-cyan text-tech-bg border-tech-cyan shadow-[0_0_15px_rgba(34,211,238,0.5)]' 
+        : 'bg-tech-bg/50 text-tech-text-dim border-tech-border hover:border-tech-cyan/50 hover:text-tech-cyan'
+      }
+    `}
+  >
+    <Icon size={16} className={highlight && active ? 'animate-pulse' : ''} />
+    <span className="text-sm font-medium">{label}</span>
+  </button>
+);
 
 export default App;
