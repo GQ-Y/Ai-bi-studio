@@ -17,6 +17,7 @@ import { GlobalAlert } from './components/ui/GlobalAlert';
 import { GuideOverlay } from './components/ui/GuideOverlay';
 import { useAppKnowledge } from './ai/hooks/useAppKnowledge';
 import { useAppActions } from './ai/hooks/useAppActions';
+import { CustomChatWidget } from './ai/components/CustomChatWidget';
 
 function App() {
   const { isNavOpen, navPosition, toggleNav, centerMode, setCenterMode, currentView, isEmergency, setEmergency, setCurrentView, setAlertNotification } = useAppStore();
@@ -24,6 +25,10 @@ function App() {
   // Initialize AI Hooks
   useAppKnowledge();
   useAppActions();
+
+  // 判断是否显示悬浮AI窗口
+  // 当不在Dashboard的AI Chat模式时，显示悬浮窗
+  const shouldShowFloatingChat = !(currentView === 'dashboard' && centerMode === 'ai-chat');
 
   // 模拟随机触发预警 (仅用于演示)
   useEffect(() => {
@@ -106,6 +111,9 @@ function App() {
 
       {/* 新手引导层 */}
       <GuideOverlay />
+
+      {/* AI 悬浮对话窗口 - 仅在非Dashboard AI模式时显示 */}
+      {shouldShowFloatingChat && <CustomChatWidget />}
 
       {/* 动态背景层 (由于主内容位移，背景最好固定) */}
       <div className="fixed inset-0 pointer-events-none z-0">

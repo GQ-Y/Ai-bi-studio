@@ -1,8 +1,10 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { useCopilotChat } from "@copilotkit/react-core";
 import { Role, TextMessage } from "@copilotkit/runtime-client-gql";
-import { Send, X, User, Bot, Sparkles } from 'lucide-react';
+import { Send, X, User, Bot, Sparkles, Mic, MicOff, Volume2 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
+import { useVoiceRecorder } from '../hooks/useVoiceRecorder';
+import { speechToText, textToSpeechStream } from '../services/voiceService';
 
 export const CustomChatWidget = () => {
   const [isOpen, setIsOpen] = useState(false);
@@ -12,6 +14,14 @@ export const CustomChatWidget = () => {
   const { visibleMessages, appendMessage, isLoading } = useCopilotChat();
 
   const [inputValue, setInputValue] = useState('');
+
+  // 语音功能状态
+  const { isRecording, startRecording, stopRecording, cancelRecording, error: recorderError } = useVoiceRecorder();
+  const [isProcessingVoice, setIsProcessingVoice] = useState(false);
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  const [voiceError, setVoiceError] = useState<string | null>(null);
+  const [autoPlayVoice, setAutoPlayVoice] = useState(true);
+  const lastAssistantMessageRef = useRef<string>('');
 
   const handleSend = async () => {
     if (!inputValue.trim()) return;
@@ -24,6 +34,55 @@ export const CustomChatWidget = () => {
       content: content,
     }));
   };
+
+  // 处理语音输入
+  const handleVoiceInput = async () => {
+    if (isRecording) {
+      setIsProcessingVoice(true);
+      setVoiceError(null);
+
+      try {
+        const audioBlob = await stopRecording();
+        if (!audioBlob) {
+          throw new Error('录音失败');
+        }
+
+        const result = await speechToText(audioBlob);
+        
+        if (result.text) {
+          setInputValue(result.text);
+        } else {
+          setVoiceError('未识别到语音内容');
+        }
+      } catch (error: unknown) {
+        const err = error as Error;
+        setVoiceError(err.message || '语音识别失败');
+        cancelRecording();
+      } finally {
+        setIsProcessingVoice(false);
+      }
+    } else {
+      setVoiceError(null);
+      await startRecording();
+    }
+  };
+
+  // 播放AI回复的语音
+  const playAssistantVoice = React.useCallback(async (text: string) => {
+    if (!text || isSpeaking) return;
+
+    setIsSpeaking(true);
+    setVoiceError(null);
+
+    try {
+      await textToSpeechStream(text);
+    } catch (error: unknown) {
+      const err = error as Error;
+      setVoiceError(err.message || '语音播放失败');
+    } finally {
+      setIsSpeaking(false);
+    }
+  }, [isSpeaking]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -38,48 +97,41 @@ export const CustomChatWidget = () => {
   }, [visibleMessages, isLoading]);
 
   // Process message content: hide thinking process and clean up
-  const processMessageContent = (content: string): string => {
-    // Remove <details> tags and their content (thinking process)
-    // Handle both HTML tags and escaped/plain text tags
+  const processMessageContent = React.useCallback((content: string): string => {
     const processed = content
-      .replace(/<details[\s\S]*?<\/details>/gi, '') // Remove HTML details tags
-      .replace(/&lt;details&gt;[\s\S]*?&lt;\/details&gt;/gi, '') // Remove escaped HTML
-      .replace(/\n<details>\s*<summary>.*?<\/summary>[\s\S]*?<\/details>\s*/gi, '') // Remove plain text with newlines
-      .replace(/<details>\s*<summary>.*?<\/summary>[\s\S]*?<\/details>/gi, ''); // Remove plain text inline
+      .replace(/<details[\s\S]*?<\/details>/gi, '')
+      .replace(/&lt;details&gt;[\s\S]*?&lt;\/details&gt;/gi, '')
+      .replace(/\n<details>\s*<summary>.*?<\/summary>[\s\S]*?<\/details>\s*/gi, '')
+      .replace(/<details>\s*<summary>.*?<\/summary>[\s\S]*?<\/details>/gi, '');
     
-    // If content is empty or only whitespace after removing thinking
     if (!processed.trim()) {
-      return ''; // Will trigger "thinking" display
+      return '';
     }
     
     return processed.trim();
-  };
+  }, []);
 
   // Filter and deduplicate messages
   const displayMessages = React.useMemo(() => {
     const seen = new Set<string>();
-    const filtered: any[] = [];
+    const filtered: unknown[] = [];
     
     for (const msg of visibleMessages) {
-      const msgAny = msg as any;
+      const msgAny = msg as unknown as Record<string, unknown>;
       
-      // Safely extract content
       const content = msgAny.content 
         ? (typeof msgAny.content === 'string' ? msgAny.content : JSON.stringify(msgAny.content))
         : '';
       
       const isUser = msgAny.role === Role.User || msgAny.role === 'user';
       
-      // Create unique key for deduplication
-      const key = `${msgAny.role}-${content.substring(0, Math.min(50, content.length))}`;
+      const key = `${msgAny.role as string}-${content.substring(0, Math.min(50, content.length))}`;
       
       if (!seen.has(key)) {
         seen.add(key);
         
-        // For assistant messages, check if there's actual content (not just thinking)
         if (!isUser) {
           const processed = processMessageContent(content);
-          // Only add if has real content or is an error message
           if (processed || content.includes('Error') || content.includes('错误')) {
             filtered.push(msg);
           }
@@ -90,7 +142,28 @@ export const CustomChatWidget = () => {
     }
     
     return filtered;
-  }, [visibleMessages]);
+  }, [visibleMessages, processMessageContent]);
+
+  // 自动播放最新的AI回复
+  useEffect(() => {
+    if (!autoPlayVoice || isLoading || displayMessages.length === 0 || !isOpen) return;
+
+    const lastMessage = displayMessages[displayMessages.length - 1] as unknown as Record<string, unknown>;
+    const isAssistant = lastMessage.role !== Role.User && lastMessage.role !== 'user';
+
+    if (isAssistant) {
+      const content = lastMessage.content 
+        ? (typeof lastMessage.content === 'string' ? lastMessage.content : JSON.stringify(lastMessage.content))
+        : '';
+      
+      const processedContent = processMessageContent(content);
+
+      if (processedContent && processedContent !== lastAssistantMessageRef.current) {
+        lastAssistantMessageRef.current = processedContent;
+        playAssistantVoice(processedContent);
+      }
+    }
+  }, [displayMessages, isLoading, autoPlayVoice, isOpen, playAssistantVoice, processMessageContent]);
 
   return (
     <>
@@ -133,7 +206,7 @@ export const CustomChatWidget = () => {
             {/* Messages Area */}
             <div className="flex-1 overflow-y-auto p-4 space-y-4 scrollbar-thin scrollbar-thumb-tech-cyan/20 scrollbar-track-transparent">
               {displayMessages.map((msg, idx) => {
-                 const msgAny = msg as any;
+                 const msgAny = msg as unknown as Record<string, unknown>;
                  const isUser = msgAny.role === Role.User || msgAny.role === 'user';
                  
                  // Safely extract content with fallback
@@ -144,7 +217,7 @@ export const CustomChatWidget = () => {
                  const displayContent = isUser ? content : processMessageContent(content);
                  
                  // Generate stable key
-                 const messageKey = `${msgAny.id || idx}-${msgAny.role}`;
+                 const messageKey = `${(msgAny.id as string) || idx}-${msgAny.role as string}`;
                  
                  return (
                   <motion.div 
@@ -202,19 +275,78 @@ export const CustomChatWidget = () => {
             </div>
 
             {/* Input Area */}
-            <div className="p-4 border-t border-white/10 bg-white/5">
+            <div className="p-4 border-t border-white/10 bg-white/5 space-y-2">
+              {/* 错误提示 */}
+              {(voiceError || recorderError) && (
+                <div className="bg-red-500/10 border border-red-500/30 rounded-lg px-3 py-2 text-red-400 text-xs">
+                  {voiceError || recorderError}
+                </div>
+              )}
+
+              {/* 语音控制栏 */}
+              <div className="flex items-center justify-between px-1">
+                <button
+                  onClick={() => setAutoPlayVoice(!autoPlayVoice)}
+                  className={`flex items-center gap-1.5 px-2 py-1 rounded-full text-xs transition-all ${
+                    autoPlayVoice 
+                      ? 'bg-tech-cyan/20 text-tech-cyan border border-tech-cyan/30' 
+                      : 'bg-slate-800/50 text-slate-400 border border-white/10'
+                  }`}
+                >
+                  <Volume2 size={12} />
+                  <span>{autoPlayVoice ? '语音:开' : '语音:关'}</span>
+                </button>
+
+                {isSpeaking && (
+                  <div className="flex items-center gap-1 text-tech-cyan text-xs">
+                    <div className="w-1 h-1 bg-tech-cyan rounded-full animate-pulse" />
+                    <span>播放中...</span>
+                  </div>
+                )}
+
+                {isRecording && (
+                  <div className="flex items-center gap-1 text-red-400 text-xs animate-pulse">
+                    <div className="w-1.5 h-1.5 bg-red-500 rounded-full" />
+                    <span>录音中</span>
+                  </div>
+                )}
+              </div>
+
+              {/* 输入框 */}
               <div className="relative">
                 <input
                   type="text"
                   value={inputValue}
                   onChange={(e) => setInputValue(e.target.value)}
                   onKeyDown={handleKeyDown}
-                  placeholder="输入指令 (如: 切换到监控中心)..."
-                  className="w-full bg-slate-950/50 border border-white/10 rounded-xl py-3 pl-4 pr-12 text-white placeholder-slate-500 focus:outline-none focus:border-tech-cyan/50 focus:ring-1 focus:ring-tech-cyan/50 transition-all"
+                  placeholder={isRecording ? "录音中..." : "输入指令或点击麦克风说话..."}
+                  disabled={isLoading || isProcessingVoice || isRecording}
+                  className="w-full bg-slate-950/50 border border-white/10 rounded-xl py-3 pl-4 pr-24 text-white placeholder-slate-500 focus:outline-none focus:border-tech-cyan/50 focus:ring-1 focus:ring-tech-cyan/50 transition-all disabled:opacity-50"
                 />
+                
+                {/* 语音按钮 */}
+                <button 
+                  onClick={handleVoiceInput}
+                  disabled={isLoading || isProcessingVoice}
+                  className={`absolute right-14 top-1/2 -translate-y-1/2 p-2 rounded-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed ${
+                    isRecording 
+                      ? 'bg-red-500/20 text-red-400 animate-pulse' 
+                      : 'bg-tech-cyan/20 hover:bg-tech-cyan/40 text-tech-cyan'
+                  }`}
+                >
+                  {isProcessingVoice ? (
+                    <div className="w-4 h-4 border-2 border-tech-cyan border-t-transparent rounded-full animate-spin" />
+                  ) : isRecording ? (
+                    <MicOff size={16} />
+                  ) : (
+                    <Mic size={16} />
+                  )}
+                </button>
+
+                {/* 发送按钮 */}
                 <button 
                   onClick={handleSend}
-                  disabled={!inputValue.trim() || isLoading}
+                  disabled={!inputValue.trim() || isLoading || isRecording}
                   className="absolute right-2 top-1/2 -translate-y-1/2 p-2 bg-tech-cyan/20 hover:bg-tech-cyan/40 text-tech-cyan rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   <Send size={16} />

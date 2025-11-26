@@ -57,6 +57,29 @@ export const textToSpeech = async (text: string): Promise<Blob> => {
 };
 
 /**
+ * 流式语音合成并直接播放
+ * 边生成边播放，减少等待时间
+ */
+export const textToSpeechStream = async (text: string): Promise<void> => {
+  const response = await fetch(`${API_BASE_URL}/api/text-to-speech`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ text })
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Unknown error' }));
+    throw new Error(error.error || '语音合成失败');
+  }
+
+  // 获取音频blob并播放
+  const audioBlob = await response.blob();
+  return playAudioBlob(audioBlob);
+};
+
+/**
  * 播放音频Blob
  */
 export const playAudioBlob = (audioBlob: Blob): Promise<void> => {

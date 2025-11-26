@@ -4,7 +4,7 @@ import { Role, TextMessage } from "@copilotkit/runtime-client-gql";
 import { Send, User, Bot, Mic, MicOff, Volume2 } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { useVoiceRecorder } from '../hooks/useVoiceRecorder';
-import { speechToText, textToSpeech, playAudioBlob } from '../services/voiceService';
+import { speechToText, textToSpeechStream } from '../services/voiceService';
 
 /**
  * ChatPanel - 嵌入式AI聊天面板组件
@@ -75,7 +75,7 @@ export const ChatPanel: React.FC = () => {
     }
   };
 
-  // 播放AI回复的语音
+  // 播放AI回复的语音（流式）
   const playAssistantVoice = React.useCallback(async (text: string) => {
     if (!text || isSpeaking) return;
 
@@ -83,9 +83,9 @@ export const ChatPanel: React.FC = () => {
     setVoiceError(null);
 
     try {
-      console.log('[ChatPanel] Generating speech for text:', text.substring(0, 50));
-      const audioBlob = await textToSpeech(text);
-      await playAudioBlob(audioBlob);
+      console.log('[ChatPanel] Generating and playing speech for text:', text.substring(0, 50));
+      // 使用流式TTS，边生成边播放
+      await textToSpeechStream(text);
       console.log('[ChatPanel] Speech playback completed');
     } catch (error: unknown) {
       const err = error as Error;
