@@ -627,20 +627,86 @@ class SiliconFlowAdapter extends OpenAIAdapter {
             const sessionId = `session_${Date.now()}_${Math.random().toString(36).substring(7)}`;
             let ttsBuffer = ''; // 累积待TTS的文本
             let ttsIndex = 0; // TTS片段索引
-            const TTS_THRESHOLD = 30; // 累积30字符就发送TTS
+            const TTS_THRESHOLD = 50; // 累积50字符就发送TTS（提高阈值，减少切分）
             
-            // 清理Markdown格式的函数
+            // 清理Markdown格式并优化文本以适合TTS的函数
+            // 保留所有正常标点符号（逗号、句号、感叹号、问号、分号），只删除Markdown格式符号
             const cleanTextForTTS = (text: string): string => {
-                return text
-                    .replace(/(\*\*|__)(.*?)\1/g, '$2')
-                    .replace(/(\*|_)(.*?)\1/g, '$2')
-                    .replace(/^#+\s/gm, '')
-                    .replace(/^[-*+]\s/gm, '')
-                    .replace(/^\d+\.\s/gm, '')
-                    .replace(/\[(.*?)\]\(.*?\)/g, '$1')
-                    .replace(/`{1,3}([^`]+)`{1,3}/g, '$1')
-                    .replace(/^>\s/gm, '')
-                    .trim();
+                let cleaned = text;
+                
+                // 移除Markdown格式符号（保留内容）
+                cleaned = cleaned.replace(/(\*\*|__)(.*?)\1/g, '$2'); // 移除粗体/斜体标记，保留文本
+                cleaned = cleaned.replace(/(\*|_)(.*?)\1/g, '$2'); // 移除斜体标记，保留文本
+                cleaned = cleaned.replace(/^#+\s/gm, ''); // 移除标题标记
+                cleaned = cleaned.replace(/^[-*+]\s/gm, ''); // 移除列表标记（- * +）
+                cleaned = cleaned.replace(/^\d+\.\s/gm, ''); // 移除有序列表数字
+                cleaned = cleaned.replace(/\[(.*?)\]\(.*?\)/g, '$1'); // 移除链接格式，保留文本
+                cleaned = cleaned.replace(/`{1,3}([^`]+)`{1,3}/g, '$1'); // 移除代码标记，保留内容
+                cleaned = cleaned.replace(/^>\s/gm, ''); // 移除引用标记
+                cleaned = cleaned.replace(/<[^>]+>/g, ''); // 移除HTML标签
+                
+                // 处理换行符：如果换行前没有标点符号，添加句号
+                cleaned = cleaned.replace(/([^，。！？；\n])\n+/g, '$1。');
+                // 多个连续换行符替换为单个句号
+                cleaned = cleaned.replace(/\n{2,}/g, '。');
+                // 单个换行符替换为空格
+                cleaned = cleaned.replace(/\n/g, ' ');
+                
+                // 确保标点符号后有适当的空格
+                cleaned = cleaned.replace(/([，。！？；])([^，。！？；\s])/g, '$1 $2');
+                
+                // 移除多余的空格，但保留标点符号后的空格
+                cleaned = cleaned.replace(/[ \t]+/g, ' ');
+                
+                return cleaned.trim();
+            };
+            
+            // 按句子边界切分文本的函数（保留所有标点符号）
+            const splitTextBySentences = (text: string, maxLength: number): string[] => {
+                const sentences: string[] = [];
+                const sentenceEndings = /[。！？]/; // 句子结束符
+                
+                // 如果文本长度小于阈值，直接返回
+                if (text.length <= maxLength) {
+                    return [text];
+                }
+                
+                let currentChunk = '';
+                
+                for (let i = 0; i < text.length; i++) {
+                    currentChunk += text[i];
+                    
+                    // 如果遇到句子结束符（句号、问号、感叹号）
+                    if (sentenceEndings.test(text[i])) {
+                        // 如果当前块已经达到阈值，切分
+                        if (currentChunk.length >= maxLength) {
+                            sentences.push(currentChunk.trim());
+                            currentChunk = '';
+                        }
+                    }
+                    // 如果当前块超过阈值且没有找到句子边界，在逗号或分号处切分
+                    else if (currentChunk.length >= maxLength * 1.5) {
+                        const lastComma = currentChunk.lastIndexOf('，');
+                        const lastSemicolon = currentChunk.lastIndexOf('；');
+                        const lastPause = Math.max(lastComma, lastSemicolon);
+                        
+                        if (lastPause > maxLength * 0.5) {
+                            sentences.push(currentChunk.substring(0, lastPause + 1).trim());
+                            currentChunk = currentChunk.substring(lastPause + 1);
+                        } else {
+                            // 如果找不到合适的切分点，强制在阈值处切分
+                            sentences.push(currentChunk.substring(0, maxLength).trim());
+                            currentChunk = currentChunk.substring(maxLength);
+                        }
+                    }
+                }
+                
+                // 添加剩余内容
+                if (currentChunk.trim().length > 0) {
+                    sentences.push(currentChunk.trim());
+                }
+                
+                return sentences.filter(s => s.length > 0);
             };
             
             // 发送TTS到前端的函数
@@ -765,10 +831,17 @@ class SiliconFlowAdapter extends OpenAIAdapter {
                         // 累积到TTS缓冲区
                         ttsBuffer += content;
                         
-                        // 当累积足够长度，立即发送TTS（不等句号）
+                        // 当累积足够长度，按句子边界切分并发送TTS
                         if (ttsBuffer.length >= TTS_THRESHOLD) {
-                            await sendTTSChunk(ttsBuffer);
-                            ttsBuffer = ''; // 清空缓冲区
+                            const chunks = splitTextBySentences(ttsBuffer, TTS_THRESHOLD);
+                            
+                            // 发送所有完整的句子块（除了最后一个）
+                            for (let i = 0; i < chunks.length - 1; i++) {
+                                await sendTTSChunk(chunks[i]);
+                            }
+                            
+                            // 保留最后一个块（可能不完整）
+                            ttsBuffer = chunks.length > 0 ? chunks[chunks.length - 1] : '';
                         }
                     }
 
@@ -1095,26 +1168,36 @@ app.post('/api/complete-ai-speech', async (req, res) => {
     console.log('[Complete AI TTS] Starting TTS for text length:', text.length);
     console.log('[Complete AI TTS] Full text:', text);
 
-    // 清理文本中的Markdown格式
+    // 清理文本中的Markdown格式并优化TTS断句
+    // 保留所有正常标点符号（逗号、句号、感叹号、问号、分号），只删除Markdown格式符号
     const cleanText = (input: string): string => {
       let cleaned = input;
-      // 移除粗体/斜体
-      cleaned = cleaned.replace(/(\*\*|__)(.*?)\1/g, '$2');
-      cleaned = cleaned.replace(/(\*|_)(.*?)\1/g, '$2');
-      // 移除标题
-      cleaned = cleaned.replace(/^#+\s/gm, '');
-      // 移除列表标记
-      cleaned = cleaned.replace(/^[-*+]\s/gm, '');
-      cleaned = cleaned.replace(/^\d+\.\s/gm, '');
-      // 移除链接
-      cleaned = cleaned.replace(/\[(.*?)\]\(.*?\)/g, '$1');
-      // 移除代码标记
-      cleaned = cleaned.replace(/`{1,3}([^`]+)`{1,3}/g, '$1');
-      // 移除引用
-      cleaned = cleaned.replace(/^>\s/gm, '');
-      // 清理多余空白和换行
-      cleaned = cleaned.replace(/\n+/g, ' ').replace(/\s+/g, ' ').trim();
-      return cleaned;
+      
+      // 移除Markdown格式符号（保留内容）
+      cleaned = cleaned.replace(/(\*\*|__)(.*?)\1/g, '$2'); // 移除粗体/斜体标记，保留文本
+      cleaned = cleaned.replace(/(\*|_)(.*?)\1/g, '$2'); // 移除斜体标记，保留文本
+      cleaned = cleaned.replace(/^#+\s/gm, ''); // 移除标题标记
+      cleaned = cleaned.replace(/^[-*+]\s/gm, ''); // 移除列表标记（- * +）
+      cleaned = cleaned.replace(/^\d+\.\s/gm, ''); // 移除有序列表数字
+      cleaned = cleaned.replace(/\[(.*?)\]\(.*?\)/g, '$1'); // 移除链接格式，保留文本
+      cleaned = cleaned.replace(/`{1,3}([^`]+)`{1,3}/g, '$1'); // 移除代码标记，保留内容
+      cleaned = cleaned.replace(/^>\s/gm, ''); // 移除引用标记
+      cleaned = cleaned.replace(/<[^>]+>/g, ''); // 移除HTML标签
+      
+      // 处理换行符：如果换行前没有标点符号，添加句号
+      cleaned = cleaned.replace(/([^，。！？；\n])\n+/g, '$1。');
+      // 多个连续换行符替换为单个句号
+      cleaned = cleaned.replace(/\n{2,}/g, '。');
+      // 单个换行符替换为空格
+      cleaned = cleaned.replace(/\n/g, ' ');
+      
+      // 确保标点符号后有适当的空格
+      cleaned = cleaned.replace(/([，。！？；])([^，。！？；\s])/g, '$1 $2');
+      
+      // 移除多余的空格，但保留标点符号后的空格
+      cleaned = cleaned.replace(/[ \t]+/g, ' ');
+      
+      return cleaned.trim();
     };
 
     const cleanedText = cleanText(text);

@@ -185,48 +185,33 @@ export const streamAISpeech = async (
 export const cleanTextForTTS = (text: string): string => {
   let cleaned = text;
 
-  // 移除Markdown标题符号 (# ## ### 等)
-  cleaned = cleaned.replace(/^#{1,6}\s+/gm, '');
+  // 移除Markdown格式符号（保留内容）
+  cleaned = cleaned.replace(/(\*\*|__)(.*?)\1/g, '$2'); // 移除粗体/斜体标记，保留文本
+  cleaned = cleaned.replace(/(\*|_)(.*?)\1/g, '$2'); // 移除斜体标记，保留文本
+  cleaned = cleaned.replace(/^#{1,6}\s+/gm, ''); // 移除标题标记
+  cleaned = cleaned.replace(/^[\s]*[-*+]\s+/gm, ''); // 移除列表标记（- * +）
+  cleaned = cleaned.replace(/^[\s]*\d+\.\s+/gm, ''); // 移除有序列表数字
+  cleaned = cleaned.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1'); // 移除链接格式，保留文本
+  cleaned = cleaned.replace(/```[\s\S]*?```/g, '代码块'); // 移除代码块标记
+  cleaned = cleaned.replace(/`([^`]+)`/g, '$1'); // 移除行内代码标记，保留内容
+  cleaned = cleaned.replace(/^[\s]*>\s+/gm, ''); // 移除引用标记
+  cleaned = cleaned.replace(/<[^>]+>/g, ''); // 移除HTML标签
   
-  // 移除Markdown列表符号 (- * + 开头)
-  cleaned = cleaned.replace(/^[\s]*[-*+]\s+/gm, '');
+  // 处理换行符：如果换行前没有标点符号，添加句号
+  cleaned = cleaned.replace(/([^，。！？；\n])\n+/g, '$1。');
+  // 多个连续换行符替换为单个句号
+  cleaned = cleaned.replace(/\n{2,}/g, '。');
+  // 单个换行符替换为空格
+  cleaned = cleaned.replace(/\n/g, ' ');
   
-  // 移除有序列表数字 (1. 2. 3. 等)
-  cleaned = cleaned.replace(/^[\s]*\d+\.\s+/gm, '');
+  // 确保标点符号后有适当的空格
+  cleaned = cleaned.replace(/([，。！？；])([^，。！？；\s])/g, '$1 $2');
   
-  // 移除Markdown引用符号 (>)
-  cleaned = cleaned.replace(/^[\s]*>\s+/gm, '');
-  
-  // 移除Markdown代码块标记 (```)
-  cleaned = cleaned.replace(/```[\s\S]*?```/g, '代码块');
-  
-  // 移除行内代码标记 (` `)
-  cleaned = cleaned.replace(/`([^`]+)`/g, '$1');
-  
-  // 移除Markdown粗体/斜体标记 (** __ * _)
-  cleaned = cleaned.replace(/(\*\*|__)(.*?)\1/g, '$2');
-  cleaned = cleaned.replace(/(\*|_)(.*?)\1/g, '$2');
-  
-  // 移除Markdown链接，保留文本 [text](url) -> text
-  cleaned = cleaned.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
-  
-  // 移除HTML标签
-  cleaned = cleaned.replace(/<[^>]+>/g, '');
-  
-  // 将多个换行符替换为单个换行
-  cleaned = cleaned.replace(/\n{3,}/g, '\n\n');
-  
-  // 将换行符替换为句号和空格，使语音更自然
-  cleaned = cleaned.replace(/\n+/g, '。 ');
-  
-  // 移除多余的空格
-  cleaned = cleaned.replace(/\s{2,}/g, ' ');
+  // 移除多余的空格，但保留标点符号后的空格
+  cleaned = cleaned.replace(/[ \t]+/g, ' ');
   
   // 移除开头和结尾的空白
   cleaned = cleaned.trim();
-  
-  // 确保句子之间有适当的停顿
-  cleaned = cleaned.replace(/([。！？])\s*([^。！？\s])/g, '$1 $2');
 
   return cleaned;
 };
