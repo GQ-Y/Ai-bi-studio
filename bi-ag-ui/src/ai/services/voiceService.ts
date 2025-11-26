@@ -18,6 +18,170 @@ export interface TextToSpeechOptions {
  * 清理文本以适合TTS朗读
  * 移除Markdown格式符号和其他不适合语音的内容
  */
+/**
+ * 连接音频SSE流
+ * 接收后端实时生成的TTS音频
+ */
+export const connectAudioStream = (
+  sessionId: string,
+  onAudio: (audioBlob: Blob, text: string, index: number) => void,
+  onComplete: () => void,
+  onError: (error: Error) => void
+): (() => void) => {
+  console.log('[Audio Stream] Connecting to SSE:', sessionId);
+
+  const eventSource = new EventSource(`${API_BASE_URL}/api/audio-stream/${sessionId}`);
+  
+  eventSource.onmessage = (event) => {
+    try {
+      const data = JSON.parse(event.data);
+      
+      if (data.type === 'audio') {
+        // 将base64转为Blob
+        const audioBytes = Uint8Array.from(atob(data.audio), c => c.charCodeAt(0));
+        const audioBlob = new Blob([audioBytes], { type: 'audio/mpeg' });
+        
+        console.log(`[Audio Stream] Received chunk ${data.index} (${audioBlob.size} bytes)`);
+        onAudio(audioBlob, data.text, data.index);
+        
+      } else if (data.type === 'complete') {
+        console.log('[Audio Stream] Stream complete');
+        onComplete();
+        eventSource.close();
+      }
+    } catch (error) {
+      console.error('[Audio Stream] Parse error:', error);
+    }
+  };
+  
+  eventSource.onerror = (error) => {
+    console.error('[Audio Stream] SSE error:', error);
+    onError(new Error('音频流连接失败'));
+    eventSource.close();
+  };
+  
+  // 返回清理函数
+  return () => {
+    console.log('[Audio Stream] Closing connection');
+    eventSource.close();
+  };
+};
+
+/**
+ * 完整AI语音合成
+ * 后端将完整文本一次性合成语音，不切分
+ */
+export const completeAISpeech = async (text: string): Promise<Blob> => {
+  console.log('[Complete AI Speech] Requesting TTS for text length:', text.length);
+
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/complete-ai-speech`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ text })
+    });
+
+    if (!response.ok) {
+      throw new Error(`Complete AI Speech failed: ${response.status}`);
+    }
+
+    const audioBlob = await response.blob();
+    console.log(`[Complete AI Speech] Received complete audio: ${audioBlob.size} bytes`);
+    
+    return audioBlob;
+
+  } catch (error) {
+    console.error('[Complete AI Speech] Error:', error);
+    throw error;
+  }
+};
+
+/**
+ * 流式AI语音合成
+ * 后端负责切分文本并合成语音，前端接收并播放
+ */
+export const streamAISpeech = async (
+  text: string,
+  onAudioChunk: (audioBlob: Blob, index: number, total: number) => void,
+  onComplete: () => void,
+  onError: (error: Error) => void
+): Promise<void> => {
+  console.log('[Stream AI Speech] Starting stream for text length:', text.length);
+
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/stream-ai-speech`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ text })
+    });
+
+    if (!response.ok) {
+      throw new Error(`Stream AI Speech failed: ${response.status}`);
+    }
+
+    const reader = response.body?.getReader();
+    if (!reader) {
+      throw new Error('No reader available');
+    }
+
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      
+      if (done) {
+        console.log('[Stream AI Speech] Stream ended');
+        break;
+      }
+
+      // 解码并累积数据
+      buffer += decoder.decode(value, { stream: true });
+      
+      // 处理完整的SSE消息（以\n\n分隔）
+      const messages = buffer.split('\n\n');
+      buffer = messages.pop() || ''; // 保留不完整的消息
+
+      for (const message of messages) {
+        if (!message.trim() || !message.startsWith('data: ')) {
+          continue;
+        }
+
+        try {
+          const jsonData = JSON.parse(message.substring(6)); // 移除 'data: ' 前缀
+
+          if (jsonData.type === 'audio') {
+            // 收到音频chunk
+            const audioBytes = Uint8Array.from(atob(jsonData.audio), c => c.charCodeAt(0));
+            const audioBlob = new Blob([audioBytes], { type: 'audio/mp3' });
+            
+            console.log(`[Stream AI Speech] Received chunk ${jsonData.index + 1}/${jsonData.total} (${audioBlob.size} bytes)`);
+            onAudioChunk(audioBlob, jsonData.index, jsonData.total);
+            
+          } else if (jsonData.type === 'complete') {
+            console.log(`[Stream AI Speech] All ${jsonData.totalChunks} chunks received`);
+            onComplete();
+            
+          } else if (jsonData.type === 'error') {
+            console.error('[Stream AI Speech] Chunk error:', jsonData.message);
+            onError(new Error(jsonData.message));
+          }
+        } catch (parseError) {
+          console.error('[Stream AI Speech] Parse error:', parseError, 'Message:', message);
+        }
+      }
+    }
+
+  } catch (error) {
+    console.error('[Stream AI Speech] Error:', error);
+    onError(error as Error);
+  }
+};
+
 export const cleanTextForTTS = (text: string): string => {
   let cleaned = text;
 

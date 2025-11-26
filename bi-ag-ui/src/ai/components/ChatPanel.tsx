@@ -6,7 +6,7 @@ import { motion } from 'framer-motion';
 import ReactMarkdown from 'react-markdown';
 import rehypeRaw from 'rehype-raw';
 import { useVoiceRecorder } from '../hooks/useVoiceRecorder';
-import { speechToText, textToSpeechStream, cleanTextForTTS } from '../services/voiceService';
+import { speechToText, connectAudioStream } from '../services/voiceService';
 
 /**
  * ChatPanel - 嵌入式AI聊天面板组件
@@ -26,98 +26,55 @@ export const ChatPanel: React.FC = () => {
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [voiceError, setVoiceError] = useState<string | null>(null);
   const [autoPlayVoice, setAutoPlayVoice] = useState(true); // 自动播放AI回复的语音
-  const ttsQueueRef = useRef<string[]>([]); // TTS队列
-  const isPlayingTTSRef = useRef<boolean>(false); // 是否正在播放TTS
-  const currentMessageBufferRef = useRef<string>(''); // 当前消息的缓冲区
-  const lastSentLengthRef = useRef<number>(0); // 上次发送TTS的长度
-  const lastMessageIdRef = useRef<string>(''); // 用于检测新消息
-  const audioPreloadRef = useRef<HTMLAudioElement | null>(null); // 预加载的下一个音频
+  const audioQueueRef = useRef<Blob[]>([]); // 音频队列
+  const isPlayingRef = useRef<boolean>(false); // 是否正在播放
+  const audioStreamCleanupRef = useRef<(() => void) | null>(null); // SSE连接清理函数
+  const connectedSessionIdRef = useRef<string | null>(null); // 当前已连接的sessionId
 
-  // 播放TTS队列中的下一个片段（带预加载优化）
-  const playNextTTSChunk = useCallback(async () => {
-    if (isPlayingTTSRef.current || ttsQueueRef.current.length === 0) {
+  // 播放音频队列中的下一个
+  const playNextAudio = useCallback(async () => {
+    if (isPlayingRef.current || audioQueueRef.current.length === 0) {
       return;
     }
 
-    isPlayingTTSRef.current = true;
+    isPlayingRef.current = true;
     setIsSpeaking(true);
 
-    const chunk = ttsQueueRef.current.shift();
-    if (!chunk) {
-      isPlayingTTSRef.current = false;
+    const audioBlob = audioQueueRef.current.shift();
+    if (!audioBlob) {
+      isPlayingRef.current = false;
       setIsSpeaking(false);
       return;
     }
 
     try {
-      console.log(`[ChatPanel] Playing TTS chunk: "${chunk.substring(0, 30)}..." (${chunk.length} chars)`);
+      const audioUrl = URL.createObjectURL(audioBlob);
+      const audio = new Audio(audioUrl);
       
-      // 如果有预加载的音频，直接使用
-      if (audioPreloadRef.current) {
-        const preloadedAudio = audioPreloadRef.current;
-        audioPreloadRef.current = null;
-        
-        await new Promise<void>((resolve, reject) => {
-          preloadedAudio.onended = () => resolve();
-          preloadedAudio.onerror = () => reject(new Error('音频播放失败'));
-          preloadedAudio.play().catch(reject);
-        });
-      } else {
-        // 没有预加载，正常请求
-        await textToSpeechStream(chunk);
-      }
-      
-      // 如果队列中还有下一个，提前开始加载（预加载）
-      if (ttsQueueRef.current.length > 0) {
-        const nextChunk = ttsQueueRef.current[0];
-        const cleanedNextChunk = cleanTextForTTS(nextChunk);
-        console.log(`[ChatPanel] Preloading next chunk: "${nextChunk.substring(0, 20)}..."`);
-        
-        // 异步预加载下一个音频
-        fetch(`${window.location.origin}/api/text-to-speech`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text: cleanedNextChunk })
-        })
-        .then(res => res.blob())
-        .then(blob => {
-          const audio = new Audio(URL.createObjectURL(blob));
-          audio.preload = 'auto';
-          audioPreloadRef.current = audio;
-          console.log('[ChatPanel] Next chunk preloaded successfully');
-        })
-        .catch(err => {
-          console.warn('[ChatPanel] Preload failed:', err);
-        });
-      }
-      
+      await new Promise<void>((resolve, reject) => {
+        audio.onended = () => {
+          URL.revokeObjectURL(audioUrl);
+          resolve();
+        };
+        audio.onerror = () => {
+          URL.revokeObjectURL(audioUrl);
+          reject(new Error('音频播放失败'));
+        };
+        audio.play().catch(reject);
+      });
     } catch (error) {
-      console.error('[ChatPanel] TTS chunk error:', error);
+      console.error('[ChatPanel] Audio playback error:', error);
     }
 
-    isPlayingTTSRef.current = false;
+    isPlayingRef.current = false;
 
     // 继续播放队列中的下一个
-    if (ttsQueueRef.current.length > 0) {
-      // 短暂延迟，让预加载有时间完成
-      setTimeout(() => playNextTTSChunk(), 50);
+    if (audioQueueRef.current.length > 0) {
+      setTimeout(() => playNextAudio(), 50);
     } else {
       setIsSpeaking(false);
     }
   }, []);
-
-  // 将文本片段加入TTS队列
-  const enqueueTTSChunk = useCallback((text: string) => {
-    if (!text || text.trim().length === 0) return;
-    
-    console.log(`[ChatPanel] Enqueuing TTS chunk: "${text}"`);
-    ttsQueueRef.current.push(text);
-    
-    // 如果当前没有在播放，立即开始
-    if (!isPlayingTTSRef.current) {
-      playNextTTSChunk();
-    }
-  }, [playNextTTSChunk]);
 
   const handleSend = async () => {
     if (!inputValue.trim()) return;
@@ -171,6 +128,7 @@ export const ChatPanel: React.FC = () => {
   // 先定义 processMessageContent 函数
   const processMessageContent = React.useCallback((content: string): string => {
     const processed = content
+      .replace(/<!--AUDIO_SESSION:.*?-->/g, '') // 移除音频session标记
       .replace(/<details[\s\S]*?<\/details>/gi, '')
       .replace(/&lt;details&gt;[\s\S]*?&lt;\/details&gt;/gi, '')
       .replace(/\n<details>\s*<summary>.*?<\/summary>[\s\S]*?<\/details>\s*/gi, '')
@@ -219,124 +177,85 @@ export const ChatPanel: React.FC = () => {
     return filtered;
   }, [visibleMessages, processMessageContent]);
 
-  // 流式增量TTS - 监听消息内容变化，每积累一定字符就发送TTS
+  // 监听AI回复并建立音频SSE连接
   useEffect(() => {
     if (!autoPlayVoice || displayMessages.length === 0) return;
 
     const lastMessage = displayMessages[displayMessages.length - 1] as unknown as Record<string, unknown>;
     const isAssistant = lastMessage.role !== Role.User && lastMessage.role !== 'user';
 
-    if (!isAssistant) {
-      // 如果不是AI消息，重置状态
-      currentMessageBufferRef.current = '';
-      lastSentLengthRef.current = 0;
-      lastMessageIdRef.current = '';
-      return;
-    }
+    if (!isAssistant) return;
 
-    const messageId = (lastMessage.id as string) || '';
     const content = lastMessage.content 
       ? (typeof lastMessage.content === 'string' ? lastMessage.content : JSON.stringify(lastMessage.content))
       : '';
+
+    // 检测sessionId（后端会在第一个chunk中发送HTML注释）
+    const sessionIdMatch = /<!--AUDIO_SESSION:(session_[^-]+)-->/.exec(content);
     
-    const processedContent = processMessageContent(content);
-
-    // 检测是否是新消息
-    if (messageId && messageId !== lastMessageIdRef.current) {
-      console.log('[ChatPanel] ===== New AI Message Detected =====');
-      console.log(`[ChatPanel] Message ID: ${messageId}`);
-      console.log('[ChatPanel] Resetting TTS buffer');
-      currentMessageBufferRef.current = '';
-      lastSentLengthRef.current = 0;
-      lastMessageIdRef.current = messageId;
-      // 清空队列（新消息开始）
-      ttsQueueRef.current = [];
-      // 清理预加载的音频
-      if (audioPreloadRef.current) {
-        audioPreloadRef.current.pause();
-        audioPreloadRef.current = null;
+    if (sessionIdMatch) {
+      const sessionId = sessionIdMatch[1];
+      
+      // 检查是否已经连接过这个session
+      if (connectedSessionIdRef.current === sessionId) {
+        console.log(`[ChatPanel] Session ${sessionId} already connected, skipping`);
+        return;
       }
-      if (!isPlayingTTSRef.current) {
-        setIsSpeaking(false);
+      
+      console.log('[ChatPanel] Detected NEW audio session:', sessionId);
+      
+      // 清理旧连接
+      if (audioStreamCleanupRef.current) {
+        console.log('[ChatPanel] Cleaning up previous SSE connection');
+        audioStreamCleanupRef.current();
+        audioStreamCleanupRef.current = null;
       }
+      
+      // 清空音频队列
+      audioQueueRef.current = [];
+      isPlayingRef.current = false;
+      
+      // 标记当前连接的sessionId
+      connectedSessionIdRef.current = sessionId;
+      
+      // 建立SSE连接
+      const cleanup = connectAudioStream(
+        sessionId,
+        (audioBlob, _text, index) => {
+          // 收到音频，加入队列
+          console.log(`[ChatPanel] Received audio chunk ${index}, adding to queue (current queue size: ${audioQueueRef.current.length})`);
+          audioQueueRef.current.push(audioBlob);
+          
+          // 如果没在播放，立即开始
+          if (!isPlayingRef.current) {
+            playNextAudio();
+          }
+        },
+        () => {
+          // 完成
+          console.log('[ChatPanel] Audio stream complete');
+        },
+        (error) => {
+          console.error('[ChatPanel] Audio stream error:', error);
+          setVoiceError(error.message);
+        }
+      );
+      
+      audioStreamCleanupRef.current = cleanup;
     }
 
-    // 更新缓冲区
-    currentMessageBufferRef.current = processedContent;
+  }, [displayMessages, autoPlayVoice, playNextAudio]);
 
-    // 打印当前接收到的内容状态
-    console.log(`[ChatPanel] Current content length: ${processedContent.length}, lastSent: ${lastSentLengthRef.current}, isLoading: ${isLoading}`);
-    if (processedContent.length > 0) {
-      console.log(`[ChatPanel] Current full content: "${processedContent}"`);
-    }
-
-    // 检查是否有新内容
-    const newContentLength = processedContent.length;
-    if (newContentLength <= lastSentLengthRef.current) {
-      // 没有新内容，直接返回
-      return;
-    }
-
-    // 提取所有未发送的新内容
-    const unsentContent = processedContent.substring(lastSentLengthRef.current);
-    const TTS_CHUNK_SIZE = 30; // 最小chunk大小
-
-    // 查找所有可能的断句点
-    const punctuationRegex = /[。，！？、；：]/g;
-    let match;
-    let lastGoodBreakPoint = -1;
-
-    // 找到最后一个超过最小chunk大小的断句点
-    while ((match = punctuationRegex.exec(unsentContent)) !== null) {
-      if (match.index >= TTS_CHUNK_SIZE * 0.6) {
-        lastGoodBreakPoint = match.index;
+  // 清理SSE连接
+  useEffect(() => {
+    return () => {
+      if (audioStreamCleanupRef.current) {
+        console.log('[ChatPanel] Component unmounting, cleaning up SSE');
+        audioStreamCleanupRef.current();
+        connectedSessionIdRef.current = null;
       }
-    }
-
-    let shouldSend = false;
-    let chunkToSend = '';
-
-    if (lastGoodBreakPoint >= 0) {
-      // 找到了合适的断句点
-      chunkToSend = unsentContent.substring(0, lastGoodBreakPoint + 1);
-      shouldSend = true;
-      console.log(`[ChatPanel] Found punctuation at ${lastGoodBreakPoint}, sending ${chunkToSend.length} chars`);
-    } else if (unsentContent.length >= TTS_CHUNK_SIZE * 1.5 && !isLoading) {
-      // 没找到断句点，但内容很长且消息已完成，强制发送
-      chunkToSend = unsentContent;
-      shouldSend = true;
-      console.log(`[ChatPanel] No punctuation found, message complete, sending all ${chunkToSend.length} chars`);
-    } else if (unsentContent.length >= TTS_CHUNK_SIZE * 2) {
-      // 内容非常长，强制切分避免等待太久
-      chunkToSend = unsentContent.substring(0, TTS_CHUNK_SIZE * 1.5);
-      shouldSend = true;
-      console.log(`[ChatPanel] Content too long (${unsentContent.length}), force sending ${chunkToSend.length} chars`);
-    }
-
-    if (shouldSend && chunkToSend.trim().length > 0) {
-      console.log(`[ChatPanel] Enqueuing TTS chunk: "${chunkToSend.substring(0, 30)}..." (${chunkToSend.length} chars)`);
-      enqueueTTSChunk(chunkToSend);
-      lastSentLengthRef.current += chunkToSend.length;
-    }
-
-    // 如果消息加载完成，发送所有剩余内容
-    if (!isLoading) {
-      const finalRemaining = processedContent.substring(lastSentLengthRef.current);
-      if (finalRemaining.trim().length > 0) {
-        console.log(`[ChatPanel] ===== Message Loading Complete =====`);
-        console.log(`[ChatPanel] Full message length: ${processedContent.length}`);
-        console.log(`[ChatPanel] Already sent: ${lastSentLengthRef.current}`);
-        console.log(`[ChatPanel] Remaining to send: ${finalRemaining.length} chars`);
-        console.log(`[ChatPanel] Final content: "${finalRemaining}"`);
-        enqueueTTSChunk(finalRemaining);
-        lastSentLengthRef.current = newContentLength;
-        console.log(`[ChatPanel] ===================================`);
-      } else {
-        console.log(`[ChatPanel] Message complete, all content already sent (${processedContent.length} chars total)`);
-      }
-    }
-
-  }, [displayMessages, isLoading, autoPlayVoice, processMessageContent, enqueueTTSChunk]);
+    };
+  }, []);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {

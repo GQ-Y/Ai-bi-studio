@@ -6,11 +6,20 @@ import { CopilotRuntime, copilotRuntimeNodeExpressEndpoint } from '@copilotkit/r
 import { OpenAIAdapter } from '@copilotkit/runtime';
 import OpenAI from 'openai';
 import dotenv from 'dotenv';
+import { EventEmitter } from 'events';
 
 dotenv.config();
 
 const app = express();
 const port = 4000;
+
+// 全局音频事件管理器 - 用于实时推送TTS音频
+const audioEventEmitter = new EventEmitter();
+audioEventEmitter.setMaxListeners(100); // 增加监听器限制
+
+// 音频缓冲管理：sessionId -> 音频队列
+const audioBuffers = new Map<string, Array<{ audio: Buffer; text: string; index: number }>>();
+const sseConnections = new Set<string>(); // 跟踪已连接的SSE客户端
 
 // Configure multer for file uploads (voice recording)
 const upload = multer({ 
@@ -222,6 +231,89 @@ class SiliconFlowAdapter extends OpenAIAdapter {
             const toolCallMap = new Map<number, string>(); // index -> id
             const calledToolNames: string[] = []; // Track which tools were called
             const fullMessageBuffer: string[] = []; // 累积完整消息内容
+            
+            // 实时TTS变量
+            const sessionId = `session_${Date.now()}_${Math.random().toString(36).substring(7)}`;
+            let ttsBuffer = ''; // 累积待TTS的文本
+            let ttsIndex = 0; // TTS片段索引
+            const TTS_THRESHOLD = 30; // 累积30字符就发送TTS
+            
+            // 清理Markdown格式的函数
+            const cleanTextForTTS = (text: string): string => {
+                return text
+                    .replace(/(\*\*|__)(.*?)\1/g, '$2')
+                    .replace(/(\*|_)(.*?)\1/g, '$2')
+                    .replace(/^#+\s/gm, '')
+                    .replace(/^[-*+]\s/gm, '')
+                    .replace(/^\d+\.\s/gm, '')
+                    .replace(/\[(.*?)\]\(.*?\)/g, '$1')
+                    .replace(/`{1,3}([^`]+)`{1,3}/g, '$1')
+                    .replace(/^>\s/gm, '')
+                    .trim();
+            };
+            
+            // 发送TTS到前端的函数
+            const sendTTSChunk = async (text: string) => {
+                if (!text || text.trim().length === 0) return;
+                
+                const cleanedText = cleanTextForTTS(text);
+                if (!cleanedText) return;
+                
+                console.log(`[Real-time TTS] Sending chunk ${ttsIndex}: "${cleanedText.substring(0, 50)}..." (${cleanedText.length} chars)`);
+                
+                try {
+                    // 调用TTS API
+                    const ttsResponse = await fetch('https://api.siliconflow.cn/v1/audio/speech', {
+                        method: 'POST',
+                        headers: {
+                            'Authorization': `Bearer ${SILICONFLOW_API_KEY}`,
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({
+                            model: 'FunAudioLLM/CosyVoice2-0.5B',
+                            input: cleanedText,
+                            voice: 'FunAudioLLM/CosyVoice2-0.5B:diana',
+                            response_format: 'mp3',
+                            sample_rate: 32000,
+                            stream: false,
+                            speed: 1.0,
+                            gain: 0
+                        })
+                    });
+                    
+                    if (ttsResponse.ok) {
+                        const audioBuffer = Buffer.from(await ttsResponse.arrayBuffer());
+                        console.log(`[Real-time TTS] Generated audio for chunk ${ttsIndex}: ${audioBuffer.length} bytes`);
+                        
+                        const audioData = {
+                            sessionId,
+                            audio: audioBuffer,
+                            text: cleanedText,
+                            index: ttsIndex
+                        };
+                        
+                        // 检查是否有SSE连接
+                        if (sseConnections.has(sessionId)) {
+                            // 直接通过事件发射器推送
+                            console.log(`[Real-time TTS] SSE connected, sending immediately`);
+                            audioEventEmitter.emit('audio', audioData);
+                        } else {
+                            // 缓冲音频，等待SSE连接
+                            console.log(`[Real-time TTS] No SSE connection yet, buffering chunk ${ttsIndex}`);
+                            if (!audioBuffers.has(sessionId)) {
+                                audioBuffers.set(sessionId, []);
+                            }
+                            audioBuffers.get(sessionId)!.push(audioData);
+                        }
+                        
+                        ttsIndex++;
+                    } else {
+                        console.error(`[Real-time TTS] TTS failed:`, ttsResponse.status);
+                    }
+                } catch (err) {
+                    console.error(`[Real-time TTS] Error:`, err);
+                }
+            };
 
             try {
                 console.log("[SiliconFlowAdapter] Requesting streaming completion from SiliconFlow (MiniMax-M2)...");
@@ -263,12 +355,30 @@ class SiliconFlowAdapter extends OpenAIAdapter {
                             messageId = chunk.id || `msg_${Date.now()}`; 
                             eventStream$.sendTextMessageStart({ messageId });
                             startedTextMessage = true;
+                            
+                            // 立即发送sessionId给前端（作为第一个内容）
+                            eventStream$.sendTextMessageContent({
+                                messageId: messageId!,
+                                content: `<!--AUDIO_SESSION:${sessionId}-->`
+                            });
+                            
+                            console.log(`[Real-time TTS] Sent session ID to frontend: ${sessionId}`);
                         }
                         
+                        // 发送实际内容
                         eventStream$.sendTextMessageContent({
                             messageId: messageId!,
                             content: content
                         });
+                        
+                        // 累积到TTS缓冲区
+                        ttsBuffer += content;
+                        
+                        // 当累积足够长度，立即发送TTS（不等句号）
+                        if (ttsBuffer.length >= TTS_THRESHOLD) {
+                            await sendTTSChunk(ttsBuffer);
+                            ttsBuffer = ''; // 清空缓冲区
+                        }
                     }
 
                     // Handle tool calls
@@ -304,6 +414,17 @@ class SiliconFlowAdapter extends OpenAIAdapter {
                         }
                     }
                 }
+                
+                // 发送剩余的TTS内容
+                if (ttsBuffer.trim().length > 0) {
+                    console.log(`[Real-time TTS] Sending final chunk: "${ttsBuffer.substring(0, 50)}..." (${ttsBuffer.length} chars)`);
+                    await sendTTSChunk(ttsBuffer);
+                    ttsBuffer = '';
+                }
+                
+                // 发送TTS完成事件
+                audioEventEmitter.emit('complete', { sessionId });
+                console.log(`[Real-time TTS] All chunks sent for session ${sessionId}`);
                 
                 // Generate intelligent fallback response based on tool calls
                 // This ensures CopilotKit doesn't auto-retry while providing meaningful feedback
@@ -413,6 +534,80 @@ class SiliconFlowAdapter extends OpenAIAdapter {
 
 const serviceAdapter = new SiliconFlowAdapter();
 
+// ==================== 实时音频推送 SSE ====================
+// GET /api/audio-stream/:sessionId
+// 前端通过SSE连接接收实时生成的TTS音频
+app.get('/api/audio-stream/:sessionId', (req, res) => {
+  const { sessionId } = req.params;
+  
+  console.log(`[Audio SSE] Client connected: ${sessionId}`);
+
+  // 设置SSE响应头
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+
+  // 标记此session已有SSE连接
+  sseConnections.add(sessionId);
+
+  // 发送缓冲的音频（如果有）
+  const bufferedAudio = audioBuffers.get(sessionId);
+  if (bufferedAudio && bufferedAudio.length > 0) {
+    console.log(`[Audio SSE] Sending ${bufferedAudio.length} buffered audio chunks`);
+    for (const chunk of bufferedAudio) {
+      const audioBase64 = chunk.audio.toString('base64');
+      res.write(`data: ${JSON.stringify({
+        type: 'audio',
+        audio: audioBase64,
+        text: chunk.text,
+        index: chunk.index
+      })}\n\n`);
+    }
+    // 清空缓冲
+    audioBuffers.delete(sessionId);
+  }
+
+  // 心跳，防止连接超时
+  const heartbeat = setInterval(() => {
+    res.write(': heartbeat\n\n');
+  }, 30000);
+
+  // 监听音频事件
+  const audioHandler = (data: { sessionId: string; audio: Buffer; text: string; index: number }) => {
+    if (data.sessionId === sessionId) {
+      const audioBase64 = data.audio.toString('base64');
+      res.write(`data: ${JSON.stringify({
+        type: 'audio',
+        audio: audioBase64,
+        text: data.text,
+        index: data.index
+      })}\n\n`);
+      console.log(`[Audio SSE] Sent audio chunk ${data.index} to ${sessionId} (${data.audio.length} bytes)`);
+    }
+  };
+
+  const completeHandler = (data: { sessionId: string }) => {
+    if (data.sessionId === sessionId) {
+      res.write(`data: ${JSON.stringify({ type: 'complete' })}\n\n`);
+      console.log(`[Audio SSE] Sent complete event to ${sessionId}`);
+    }
+  };
+
+  audioEventEmitter.on('audio', audioHandler);
+  audioEventEmitter.on('complete', completeHandler);
+
+  // 客户端断开连接
+  req.on('close', () => {
+    console.log(`[Audio SSE] Client disconnected: ${sessionId}`);
+    clearInterval(heartbeat);
+    sseConnections.delete(sessionId);
+    audioBuffers.delete(sessionId); // 清理缓冲
+    audioEventEmitter.off('audio', audioHandler);
+    audioEventEmitter.off('complete', completeHandler);
+  });
+});
+
 // ==================== 语音识别 API ====================
 // POST /api/speech-to-text
 // 使用 FunAudioLLM/SenseVoiceSmall 模型进行语音识别
@@ -487,6 +682,112 @@ app.post('/api/speech-to-text', upload.single('audio'), async (req, res) => {
       error: 'Speech recognition failed', 
       message: err.message 
     });
+  }
+});
+
+// ==================== 完整AI语音合成 API ====================
+// POST /api/complete-ai-speech
+// 接收AI的完整回复，一次性合成完整语音（不切分）
+app.post('/api/complete-ai-speech', async (req, res) => {
+  try {
+    const { text } = req.body;
+
+    if (!text || typeof text !== 'string') {
+      return res.status(400).json({ error: 'No text provided' });
+    }
+
+    console.log('[Complete AI TTS] Starting TTS for text length:', text.length);
+    console.log('[Complete AI TTS] Full text:', text);
+
+    // 清理文本中的Markdown格式
+    const cleanText = (input: string): string => {
+      let cleaned = input;
+      // 移除粗体/斜体
+      cleaned = cleaned.replace(/(\*\*|__)(.*?)\1/g, '$2');
+      cleaned = cleaned.replace(/(\*|_)(.*?)\1/g, '$2');
+      // 移除标题
+      cleaned = cleaned.replace(/^#+\s/gm, '');
+      // 移除列表标记
+      cleaned = cleaned.replace(/^[-*+]\s/gm, '');
+      cleaned = cleaned.replace(/^\d+\.\s/gm, '');
+      // 移除链接
+      cleaned = cleaned.replace(/\[(.*?)\]\(.*?\)/g, '$1');
+      // 移除代码标记
+      cleaned = cleaned.replace(/`{1,3}([^`]+)`{1,3}/g, '$1');
+      // 移除引用
+      cleaned = cleaned.replace(/^>\s/gm, '');
+      // 清理多余空白和换行
+      cleaned = cleaned.replace(/\n+/g, ' ').replace(/\s+/g, ' ').trim();
+      return cleaned;
+    };
+
+    const cleanedText = cleanText(text);
+    console.log('[Complete AI TTS] Cleaned text length:', cleanedText.length);
+    console.log('[Complete AI TTS] Cleaned text:', cleanedText);
+
+    // 一次性调用TTS API，不切分
+    const ttsResponse = await fetch('https://api.siliconflow.cn/v1/audio/speech', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${SILICONFLOW_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        model: 'FunAudioLLM/CosyVoice2-0.5B',
+        input: cleanedText,
+        voice: 'FunAudioLLM/CosyVoice2-0.5B:diana',
+        response_format: 'mp3',
+        sample_rate: 32000,
+        stream: true, // 启用流式输出
+        speed: 1.0,
+        gain: 0
+      })
+    });
+
+    if (!ttsResponse.ok) {
+      const errorText = await ttsResponse.text();
+      console.error('[Complete AI TTS] TTS API Error:', ttsResponse.status, errorText);
+      return res.status(ttsResponse.status).json({ 
+        error: 'TTS generation failed', 
+        details: errorText 
+      });
+    }
+
+    // 流式传输音频到前端
+    res.setHeader('Content-Type', 'audio/mpeg');
+    res.setHeader('Transfer-Encoding', 'chunked');
+
+    console.log('[Complete AI TTS] Streaming audio to client...');
+    
+    // 直接管道传输音频流
+    const reader = ttsResponse.body?.getReader();
+    if (!reader) {
+      throw new Error('No audio stream available');
+    }
+
+    let totalBytes = 0;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      
+      res.write(value);
+      totalBytes += value.length;
+    }
+
+    console.log(`[Complete AI TTS] Streaming completed, sent ${totalBytes} bytes`);
+    res.end();
+
+  } catch (error: unknown) {
+    const err = error as Error;
+    console.error('[Complete AI TTS] Error:', err);
+    if (!res.headersSent) {
+      res.status(500).json({ 
+        error: 'Complete TTS failed', 
+        message: err.message 
+      });
+    } else {
+      res.end();
+    }
   }
 });
 
