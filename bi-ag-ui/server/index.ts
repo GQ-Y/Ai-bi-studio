@@ -1,5 +1,7 @@
 import express from 'express';
 import cors from 'cors';
+import multer from 'multer';
+import axios from 'axios';
 import { CopilotRuntime, copilotRuntimeNodeExpressEndpoint } from '@copilotkit/runtime';
 import { OpenAIAdapter } from '@copilotkit/runtime';
 import OpenAI from 'openai';
@@ -10,13 +12,21 @@ dotenv.config();
 const app = express();
 const port = 4000;
 
+// Configure multer for file uploads (voice recording)
+const upload = multer({ 
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 } // 10MB limit
+});
+
 app.use(cors());
 app.use(express.json());
 
 // SiliconFlow Configuration
 // Using Kimi model which supports reasoning and tools better
+const SILICONFLOW_API_KEY = 'sk-sedikaywkisyertdnwzqbwgdncqndeqfjgrcutiirgbebfgk';
+
 const openai = new OpenAI({
-  apiKey: process.env.SILICONFLOW_API_KEY || 'sk-sedikaywkisyertdnwzqbwgdncqndeqfjgrcutiirgbebfgk',
+  apiKey: SILICONFLOW_API_KEY,
   baseURL: 'https://api.siliconflow.cn/v1',
 });
 
@@ -345,6 +355,168 @@ class SiliconFlowAdapter extends OpenAIAdapter {
 }
 
 const serviceAdapter = new SiliconFlowAdapter();
+
+// ==================== 语音识别 API ====================
+// POST /api/speech-to-text
+// 使用 FunAudioLLM/SenseVoiceSmall 模型进行语音识别
+app.post('/api/speech-to-text', upload.single('audio'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No audio file provided' });
+    }
+
+    console.log('[ASR] Received audio file:', {
+      originalname: req.file.originalname,
+      mimetype: req.file.mimetype,
+      size: req.file.size,
+      bufferLength: req.file.buffer.length
+    });
+
+    // 验证音频数据
+    if (req.file.buffer.length === 0) {
+      return res.status(400).json({ error: 'Audio file is empty' });
+    }
+
+    // 使用axios和form-data发送请求
+    const FormData = (await import('form-data')).default;
+    const formData = new FormData();
+    
+    // 将Buffer作为stream添加到formData
+    formData.append('file', req.file.buffer, {
+      filename: 'recording.webm',
+      contentType: 'audio/webm'
+    });
+    formData.append('model', 'FunAudioLLM/SenseVoiceSmall');
+
+    console.log('[ASR] Sending request to SiliconFlow API with axios...');
+
+    try {
+      // 使用axios发送请求（axios对form-data支持更好）
+      const response = await axios.post(
+        'https://api.siliconflow.cn/v1/audio/transcriptions',
+        formData,
+        {
+          headers: {
+            'Authorization': `Bearer ${SILICONFLOW_API_KEY}`,
+            ...formData.getHeaders()
+          },
+          maxBodyLength: Infinity,
+          maxContentLength: Infinity
+        }
+      );
+
+      console.log('[ASR] Recognition successful:', response.data);
+
+      res.json({ 
+        text: response.data.text || '',
+        language: response.data.language || 'zh'
+      });
+
+    } catch (error: unknown) {
+      if (axios.isAxiosError(error) && error.response) {
+        console.error('[ASR] API Error:', error.response.status, error.response.data);
+        return res.status(error.response.status).json({ 
+          error: 'Speech recognition failed', 
+          details: error.response.data
+        });
+      }
+      throw error;
+    }
+
+  } catch (error: unknown) {
+    const err = error as Error;
+    console.error('[ASR] Error:', err);
+    res.status(500).json({ 
+      error: 'Speech recognition failed', 
+      message: err.message 
+    });
+  }
+});
+
+// ==================== 语音合成 API ====================
+// POST /api/text-to-speech
+// 使用 FunAudioLLM/CosyVoice2-0.5B 模型进行流式语音合成
+// 文档: https://docs.siliconflow.cn/cn/api-reference/audio/create-speech
+app.post('/api/text-to-speech', async (req, res) => {
+  try {
+    const { text } = req.body;
+
+    if (!text || typeof text !== 'string') {
+      return res.status(400).json({ error: 'No text provided' });
+    }
+
+    console.log('[TTS] Generating speech for text:', text.substring(0, 100));
+
+    // 根据硅基流动文档，调用TTS API
+    const response = await fetch('https://api.siliconflow.cn/v1/audio/speech', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${SILICONFLOW_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        model: 'FunAudioLLM/CosyVoice2-0.5B',
+        input: text, // 直接使用文本，不需要特殊格式（除非需要情感控制）
+        voice: 'FunAudioLLM/CosyVoice2-0.5B:diana', // 使用完整的voice格式
+        response_format: 'mp3',
+        sample_rate: 32000, // 默认32000 Hz
+        stream: true, // 启用流式输出
+        speed: 1.0,
+        gain: 0
+      })
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error('[TTS] API Error:', response.status, errorText);
+      
+      // 尝试解析错误响应
+      let errorDetails;
+      try {
+        errorDetails = JSON.parse(errorText);
+      } catch {
+        errorDetails = { message: errorText };
+      }
+      
+      return res.status(response.status).json({ 
+        error: 'Text-to-speech failed', 
+        details: errorDetails
+      });
+    }
+
+    // 设置响应头为音频流
+    res.setHeader('Content-Type', 'audio/mpeg');
+    res.setHeader('Transfer-Encoding', 'chunked');
+
+    // 将音频流传递给客户端
+    const reader = response.body?.getReader();
+    if (reader) {
+      const pump = async (): Promise<void> => {
+        const { done, value } = await reader.read();
+        if (done) {
+          res.end();
+          return;
+        }
+        res.write(value);
+        return pump();
+      };
+      await pump();
+      console.log('[TTS] Streaming audio completed');
+    } else {
+      res.status(500).json({ error: 'No response body from TTS API' });
+    }
+
+  } catch (error: unknown) {
+    const err = error as Error;
+    console.error('[TTS] Error:', err);
+    if (!res.headersSent) {
+      res.status(500).json({ 
+        error: 'Text-to-speech failed', 
+        message: err.message 
+      });
+    }
+  }
+});
 
 // Use the Express adapter provided by the library
 app.use('/copilotkit', (req, res, next) => {

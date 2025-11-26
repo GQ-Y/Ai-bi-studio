@@ -1,8 +1,10 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { useCopilotChat } from "@copilotkit/react-core";
 import { Role, TextMessage } from "@copilotkit/runtime-client-gql";
-import { Send, User, Bot } from 'lucide-react';
+import { Send, User, Bot, Mic, MicOff, Volume2 } from 'lucide-react';
 import { motion } from 'framer-motion';
+import { useVoiceRecorder } from '../hooks/useVoiceRecorder';
+import { speechToText, textToSpeech, playAudioBlob } from '../services/voiceService';
 
 /**
  * ChatPanel - 嵌入式AI聊天面板组件
@@ -15,6 +17,14 @@ export const ChatPanel: React.FC = () => {
   const { visibleMessages, appendMessage, isLoading } = useCopilotChat();
 
   const [inputValue, setInputValue] = useState('');
+  
+  // 语音功能状态
+  const { isRecording, startRecording, stopRecording, cancelRecording, error: recorderError } = useVoiceRecorder();
+  const [isProcessingVoice, setIsProcessingVoice] = useState(false);
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  const [voiceError, setVoiceError] = useState<string | null>(null);
+  const [autoPlayVoice, setAutoPlayVoice] = useState(true); // 自动播放AI回复的语音
+  const lastAssistantMessageRef = useRef<string>('');
 
   const handleSend = async () => {
     if (!inputValue.trim()) return;
@@ -28,21 +38,66 @@ export const ChatPanel: React.FC = () => {
     }));
   };
 
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      handleSend();
+  // 处理语音输入
+  const handleVoiceInput = async () => {
+    if (isRecording) {
+      // 停止录音并转换为文本
+      setIsProcessingVoice(true);
+      setVoiceError(null);
+
+      try {
+        const audioBlob = await stopRecording();
+        if (!audioBlob) {
+          throw new Error('录音失败');
+        }
+
+        console.log('[ChatPanel] Transcribing audio...');
+        const result = await speechToText(audioBlob);
+        
+        if (result.text) {
+          setInputValue(result.text);
+          console.log('[ChatPanel] Transcription successful:', result.text);
+        } else {
+          setVoiceError('未识别到语音内容');
+        }
+      } catch (error: unknown) {
+        const err = error as Error;
+        console.error('[ChatPanel] Voice input error:', err);
+        setVoiceError(err.message || '语音识别失败');
+        cancelRecording();
+      } finally {
+        setIsProcessingVoice(false);
+      }
+    } else {
+      // 开始录音
+      setVoiceError(null);
+      await startRecording();
     }
   };
 
-  // Auto-scroll to bottom when new messages arrive
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [visibleMessages, isLoading]);
+  // 播放AI回复的语音
+  const playAssistantVoice = React.useCallback(async (text: string) => {
+    if (!text || isSpeaking) return;
 
-  // Process message content: hide thinking process and clean up
-  const processMessageContent = (content: string): string => {
-    // Remove <details> tags and their content (thinking process)
+    setIsSpeaking(true);
+    setVoiceError(null);
+
+    try {
+      console.log('[ChatPanel] Generating speech for text:', text.substring(0, 50));
+      const audioBlob = await textToSpeech(text);
+      await playAudioBlob(audioBlob);
+      console.log('[ChatPanel] Speech playback completed');
+    } catch (error: unknown) {
+      const err = error as Error;
+      console.error('[ChatPanel] TTS error:', err);
+      setVoiceError(err.message || '语音播放失败');
+    } finally {
+      setIsSpeaking(false);
+    }
+  }, [isSpeaking]);
+
+  // 先定义 processMessageContent 函数
+  const processMessageContent = React.useCallback((content: string): string => {
     const processed = content
       .replace(/<details[\s\S]*?<\/details>/gi, '')
       .replace(/&lt;details&gt;[\s\S]*?&lt;\/details&gt;/gi, '')
@@ -54,7 +109,7 @@ export const ChatPanel: React.FC = () => {
     }
     
     return processed.trim();
-  };
+  }, []);
 
   // Filter and deduplicate messages
   const displayMessages = React.useMemo(() => {
@@ -90,7 +145,41 @@ export const ChatPanel: React.FC = () => {
     }
     
     return filtered;
-  }, [visibleMessages]);
+  }, [visibleMessages, processMessageContent]);
+
+  // 自动播放最新的AI回复
+  useEffect(() => {
+    if (!autoPlayVoice || isLoading || displayMessages.length === 0) return;
+
+    const lastMessage = displayMessages[displayMessages.length - 1] as unknown as Record<string, unknown>;
+    const isAssistant = lastMessage.role !== Role.User && lastMessage.role !== 'user';
+
+    if (isAssistant) {
+      const content = lastMessage.content 
+        ? (typeof lastMessage.content === 'string' ? lastMessage.content : JSON.stringify(lastMessage.content))
+        : '';
+      
+      const processedContent = processMessageContent(content);
+
+      // 只播放新的消息（避免重复播放）
+      if (processedContent && processedContent !== lastAssistantMessageRef.current) {
+        lastAssistantMessageRef.current = processedContent;
+        playAssistantVoice(processedContent);
+      }
+    }
+  }, [displayMessages, isLoading, autoPlayVoice, playAssistantVoice, processMessageContent]);
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handleSend();
+    }
+  };
+
+  // Auto-scroll to bottom when new messages arrive
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [visibleMessages, isLoading]);
 
   return (
     <div className="flex flex-col h-full relative z-10">
@@ -188,23 +277,91 @@ export const ChatPanel: React.FC = () => {
       </div>
 
       {/* 输入框区域 */}
-      <div className="mt-4 relative">
-        <input 
-          type="text" 
-          value={inputValue}
-          onChange={(e) => setInputValue(e.target.value)}
-          onKeyDown={handleKeyDown}
-          placeholder="输入指令 (如: 切换到监控中心)..." 
-          disabled={isLoading}
-          className="w-full bg-slate-900/50 border border-white/10 rounded-full pl-6 pr-12 py-4 text-white placeholder-slate-400 focus:outline-none focus:border-blue-400/50 focus:bg-slate-900/80 transition-all backdrop-blur-md disabled:opacity-50 disabled:cursor-not-allowed"
-        />
-        <button 
-          onClick={handleSend}
-          disabled={!inputValue.trim() || isLoading}
-          className="absolute right-2 top-1/2 -translate-y-1/2 p-2 bg-blue-500 hover:bg-blue-400 rounded-full text-white transition-colors shadow-lg shadow-blue-500/20 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-blue-500"
-        >
-          <Send size={18} />
-        </button>
+      <div className="mt-4 space-y-2">
+        {/* 错误提示 */}
+        {(voiceError || recorderError) && (
+          <motion.div
+            initial={{ opacity: 0, y: -10 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="bg-red-500/10 border border-red-500/30 rounded-lg px-3 py-2 text-red-400 text-xs"
+          >
+            {voiceError || recorderError}
+          </motion.div>
+        )}
+
+        {/* 语音功能控制条 */}
+        <div className="flex items-center justify-between px-2">
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setAutoPlayVoice(!autoPlayVoice)}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs transition-all ${
+                autoPlayVoice 
+                  ? 'bg-blue-500/20 text-blue-400 border border-blue-500/30' 
+                  : 'bg-slate-800/50 text-slate-400 border border-white/10 hover:border-white/20'
+              }`}
+              title={autoPlayVoice ? '关闭语音播放' : '开启语音播放'}
+            >
+              <Volume2 size={14} />
+              <span>{autoPlayVoice ? '语音播放:开' : '语音播放:关'}</span>
+            </button>
+
+            {isSpeaking && (
+              <div className="flex items-center gap-1 text-blue-400 text-xs">
+                <div className="w-1 h-1 bg-blue-400 rounded-full animate-pulse" />
+                <span>播放中...</span>
+              </div>
+            )}
+          </div>
+
+          {isRecording && (
+            <div className="flex items-center gap-2 text-red-400 text-xs animate-pulse">
+              <div className="w-2 h-2 bg-red-500 rounded-full" />
+              <span>录音中</span>
+            </div>
+          )}
+        </div>
+
+        {/* 输入框 */}
+        <div className="relative">
+          <input 
+            type="text" 
+            value={inputValue}
+            onChange={(e) => setInputValue(e.target.value)}
+            onKeyDown={handleKeyDown}
+            placeholder={isRecording ? "录音中... 点击麦克风停止" : "输入指令或点击麦克风说话..."} 
+            disabled={isLoading || isProcessingVoice || isRecording}
+            className="w-full bg-slate-900/50 border border-white/10 rounded-full pl-6 pr-24 py-4 text-white placeholder-slate-400 focus:outline-none focus:border-blue-400/50 focus:bg-slate-900/80 transition-all backdrop-blur-md disabled:opacity-50 disabled:cursor-not-allowed"
+          />
+          
+          {/* 语音输入按钮 */}
+          <button 
+            onClick={handleVoiceInput}
+            disabled={isLoading || isProcessingVoice}
+            className={`absolute right-14 top-1/2 -translate-y-1/2 p-2 rounded-full text-white transition-all shadow-lg disabled:opacity-50 disabled:cursor-not-allowed ${
+              isRecording 
+                ? 'bg-red-500 hover:bg-red-400 shadow-red-500/30 animate-pulse' 
+                : 'bg-blue-500/80 hover:bg-blue-500 shadow-blue-500/20'
+            }`}
+            title={isRecording ? "停止录音" : "开始录音"}
+          >
+            {isProcessingVoice ? (
+              <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+            ) : isRecording ? (
+              <MicOff size={18} />
+            ) : (
+              <Mic size={18} />
+            )}
+          </button>
+
+          {/* 发送按钮 */}
+          <button 
+            onClick={handleSend}
+            disabled={!inputValue.trim() || isLoading || isRecording}
+            className="absolute right-2 top-1/2 -translate-y-1/2 p-2 bg-blue-500 hover:bg-blue-400 rounded-full text-white transition-colors shadow-lg shadow-blue-500/20 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-blue-500"
+          >
+            <Send size={18} />
+          </button>
+        </div>
       </div>
     </div>
   );
