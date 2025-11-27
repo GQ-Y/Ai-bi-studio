@@ -521,6 +521,8 @@ class SiliconFlowAdapter extends OpenAIAdapter {
             let startedTextMessage = false;
             let messageId: string | undefined;
             const toolCallMap = new Map<number, string>(); // index -> id
+            const toolCallNames = new Map<number, string>(); // index -> name
+            const toolCallArgsBuffer = new Map<number, string>(); // index -> accumulated args
             const calledToolNames: string[] = []; // Track which tools were called
             const fullMessageBuffer: string[] = []; // 累积完整消息内容
             
@@ -746,16 +748,18 @@ class SiliconFlowAdapter extends OpenAIAdapter {
                         }
                     }
 
-                    // Handle tool calls
+                    // Handle tool calls - 累积参数，不要分块发送
                     if (delta.tool_calls) {
                         for (const toolCall of delta.tool_calls) {
                             const index = toolCall.index;
                             
                             if (toolCall.id) {
-                                // New tool call start
+                                // New tool call start - 只记录，不立即发送
                                 const id = toolCall.id;
                                 const toolName = toolCall.function?.name || "";
                                 toolCallMap.set(index, id);
+                                toolCallNames.set(index, toolName);
+                                toolCallArgsBuffer.set(index, ""); // 初始化参数缓冲区
                                 
                                 console.log(`[Tool Call] Starting: ${toolName} (id: ${id}, index: ${index})`);
                                 
@@ -763,22 +767,13 @@ class SiliconFlowAdapter extends OpenAIAdapter {
                                 if (toolName && !calledToolNames.includes(toolName)) {
                                     calledToolNames.push(toolName);
                                 }
-                                
-                                console.log(`[Tool Call] Sending ActionExecutionStart to frontend...`);
-                                eventStream$.sendActionExecutionStart({
-                                    actionExecutionId: id,
-                                    actionName: toolName,
-                                    parentMessageId: chunk.id || messageId || `msg_${Date.now()}`
-                                });
                             }
 
+                            // 累积参数片段
                             const args = toolCall.function?.arguments;
-                            if (args && toolCallMap.has(index)) {
-                                console.log(`[Tool Call] Sending arguments for tool ${toolCallMap.get(index)}: ${args.substring(0, 100)}...`);
-                                eventStream$.sendActionExecutionArgs({
-                                    actionExecutionId: toolCallMap.get(index)!,
-                                    args: args
-                                });
+                            if (args && toolCallArgsBuffer.has(index)) {
+                                const currentArgs = toolCallArgsBuffer.get(index) || "";
+                                toolCallArgsBuffer.set(index, currentArgs + args);
                             }
                         }
                     }
@@ -841,8 +836,28 @@ class SiliconFlowAdapter extends OpenAIAdapter {
                     eventStream$.sendTextMessageEnd({ messageId });
                 }
 
-                // End all tool calls
-                for (const id of toolCallMap.values()) {
+                // 发送所有累积的工具调用（完整的参数）
+                for (const [index, id] of toolCallMap.entries()) {
+                    const toolName = toolCallNames.get(index) || "";
+                    const fullArgs = toolCallArgsBuffer.get(index) || "{}";
+                    
+                    console.log(`[Tool Call] Sending complete tool call: ${toolName} (id: ${id})`);
+                    console.log(`[Tool Call] Full args: ${fullArgs}`);
+                    
+                    // 发送 ActionExecutionStart
+                    eventStream$.sendActionExecutionStart({
+                        actionExecutionId: id,
+                        actionName: toolName,
+                        parentMessageId: messageId || `msg_${Date.now()}`
+                    });
+                    
+                    // 发送完整的参数
+                    eventStream$.sendActionExecutionArgs({
+                        actionExecutionId: id,
+                        args: fullArgs
+                    });
+                    
+                    // 发送 ActionExecutionEnd
                     eventStream$.sendActionExecutionEnd({ actionExecutionId: id });
                 }
                 

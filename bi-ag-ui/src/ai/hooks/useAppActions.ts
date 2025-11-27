@@ -27,10 +27,38 @@ export const useAppActions = () => {
         type: "string", 
         description: "The target page view (dashboard, monitor, alert, patrol, broadcast)",
         required: true,
-        // Remove strict enum from schema to allow model to guess, we'll handle validation in handler
       }
     ],
+    // 添加 render 来调试工具调用状态
+    render: ({ status, args }) => {
+      console.log(`[AI Action - navigateToPage] Render called! Status: ${status}, Args:`, args);
+      // 当状态为 executing 时，直接执行导航
+      if (status === 'executing' && args.page) {
+        const page = args.page;
+        const normalizedPage = page.toLowerCase().replace(/\s+/g, '').replace(/-/g, '');
+        
+        let targetView: PageView | null = null;
+        if (normalizedPage.includes('dash') || normalizedPage.includes('main') || normalizedPage.includes('home') || normalizedPage.includes('综合') || normalizedPage.includes('大屏')) {
+          targetView = 'dashboard';
+        } else if (normalizedPage.includes('monitor') || normalizedPage.includes('camera') || normalizedPage.includes('cctv') || normalizedPage.includes('video') || normalizedPage.includes('监控')) {
+          targetView = 'monitor';
+        } else if (normalizedPage.includes('alert') || normalizedPage.includes('warn') || normalizedPage.includes('alarm') || normalizedPage.includes('预警') || normalizedPage.includes('报警')) {
+          targetView = 'alert';
+        } else if (normalizedPage.includes('patrol') || normalizedPage.includes('inspect') || normalizedPage.includes('guard') || normalizedPage.includes('巡查') || normalizedPage.includes('巡逻')) {
+          targetView = 'patrol';
+        } else if (normalizedPage.includes('broad') || normalizedPage.includes('cast') || normalizedPage.includes('speak') || normalizedPage.includes('广播') || normalizedPage.includes('喊话')) {
+          targetView = 'broadcast';
+        }
+        
+        if (targetView) {
+          console.log(`[AI Action - navigateToPage] Executing navigation to: ${targetView}`);
+          setCurrentView(targetView);
+        }
+      }
+      return null; // 不渲染任何 UI
+    },
     handler: async ({ page }) => {
+      console.log(`[AI Action - navigateToPage] Handler called with page: ${page}`);
       // Validate input
       if (!page || typeof page !== 'string') {
         console.error('[AI Action] Invalid page parameter:', page);
