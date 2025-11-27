@@ -7,8 +7,18 @@ import { OpenAIAdapter } from '@copilotkit/runtime';
 import OpenAI from 'openai';
 import dotenv from 'dotenv';
 import { EventEmitter } from 'events';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { VolcEngineTTSClient } from './volcengine-ws.js';
 
-dotenv.config();
+// crypto import removed - not currently used
+
+// 获取当前文件的目录路径（ESM模块）
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// 加载.env文件（从server目录，与index.ts同一目录）
+dotenv.config({ path: path.join(__dirname, '.env') });
 
 const app = express();
 const port = 4000;
@@ -192,7 +202,326 @@ const upload = multer({
   limits: { fileSize: 10 * 1024 * 1024 } // 10MB limit
 });
 
-// SiliconFlow Configuration
+// ==================== 火山引擎配置 ====================
+// 语音识别 (ASR) 配置
+const ASR_ACCESS_TOKEN = process.env.ASR_ACCESS_TOKEN || '';
+const ASR_APP_ID = process.env.ASR_APP_ID || '';
+
+// 语音合成 (TTS) 配置
+const TTS_ACCESS_TOKEN = process.env.TTS_ACCESS_TOKEN || '';
+const TTS_APP_ID = process.env.TTS_APP_ID || '';
+const TTS_SPEAKER = process.env.TTS_SPEAKER || 'zh_female_sajiaonvyou_moon_bigtts'; // 默认音色
+// TTS API Key (如果提供，优先使用)
+const TTS_API_KEY = process.env.TTS_API_KEY || '';
+const TTS_API_KEY_NAME = process.env.TTS_API_KEY_NAME || '';
+
+// 火山方舟 LLM 配置
+const LLM_ENDPOINT_ID = process.env.LLM_ENDPOINT_ID || '';
+const ARK_API_KEY = process.env.ARK_API_KEY || '';
+
+// 配置验证和日志
+console.log('[VolcEngine Config] ====================');
+console.log('[VolcEngine Config] ASR_APP_ID:', ASR_APP_ID ? '✓ Configured' : '✗ Not configured');
+console.log('[VolcEngine Config] ASR_ACCESS_TOKEN:', ASR_ACCESS_TOKEN ? '✓ Configured' : '✗ Not configured');
+console.log('[VolcEngine Config] TTS_APP_ID:', TTS_APP_ID ? '✓ Configured' : '✗ Not configured');
+console.log('[VolcEngine Config] TTS_ACCESS_TOKEN:', TTS_ACCESS_TOKEN ? '✓ Configured' : '✗ Not configured');
+console.log('[VolcEngine Config] TTS_SPEAKER:', TTS_SPEAKER);
+console.log('[VolcEngine Config] LLM_ENDPOINT_ID:', LLM_ENDPOINT_ID ? '✓ Configured' : '✗ Not configured');
+console.log('[VolcEngine Config] ARK_API_KEY:', ARK_API_KEY ? '✓ Configured' : '✗ Not configured');
+console.log('[VolcEngine Config] ====================');
+
+// 火山引擎 API 基础URL
+// 根据文档：https://www.volcengine.com/docs/6561/1257584
+const VOLCENGINE_API_BASE = 'https://openspeech.bytedance.com';
+const ARK_API_BASE = 'https://ark.cn-beijing.volces.com/api/v3';
+
+// ==================== 火山引擎 API 辅助函数 ====================
+
+// 注意：火山引擎API签名函数已移除，当前使用Bearer Token认证
+// 如果需要AK/SK签名认证，可以参考：https://www.volcengine.com/docs/6291/65568
+
+/**
+ * 调用火山引擎语音识别API（非流式，用于文件上传）
+ * 参考文档：https://www.volcengine.com/docs/6561/1257584
+ * 参考实现：ai-app-lab/demohouse/media2doc/backend/actions/asr.py
+ * 
+ * 注意：火山引擎ASR主要支持WebSocket流式识别，HTTP API可能需要使用任务提交方式
+ * 这里提供一个基础实现，可能需要根据实际API文档调整
+ */
+async function callVolcEngineASR(audioBuffer: Buffer, appId: string, accessToken: string): Promise<string> {
+  // 根据参考项目，ASR可能需要使用任务提交方式
+  // 但当前场景需要实时识别，暂时使用简化的HTTP API尝试
+  // 如果失败，会fallback到SiliconFlow
+  
+  const url = `${VOLCENGINE_API_BASE}/api/v3/auc/bigmodel/submit`;
+  const requestId = `${Date.now()}_${Math.random().toString(36).substring(7)}`;
+  
+  // 注意：实际API可能需要音频URL而不是直接上传文件
+  // 这里先尝试直接上传的方式
+  const FormData = (await import('form-data')).default;
+  const formData = new FormData();
+  
+  // 根据参考项目，使用正确的header格式
+  const headers = {
+    'X-Api-App-Key': appId,
+    'X-Api-Access-Key': accessToken,
+    'X-Api-Resource-Id': 'volc.bigasr.auc',
+    'X-Api-Request-Id': requestId,
+    'X-Api-Sequence': '-1',
+    ...formData.getHeaders()
+  };
+  
+  // 尝试直接上传音频文件
+  formData.append('audio', audioBuffer, {
+    filename: 'audio.webm',
+    contentType: 'audio/webm'
+  });
+  formData.append('format', 'webm');
+  formData.append('sample_rate', '16000');
+  
+  try {
+    const response = await axios.post(url, formData, {
+      headers,
+      maxBodyLength: Infinity,
+      maxContentLength: Infinity
+    });
+    
+    // 检查响应状态（参考项目使用X-Api-Status-Code header）
+    const statusCode = response.headers['x-api-status-code'];
+    if (statusCode && statusCode !== '20000000') {
+      throw new Error(`ASR API returned status code: ${statusCode}`);
+    }
+    
+    // 根据实际API响应格式解析
+    const result = response.data;
+    if (result.result && result.result.text) {
+      return result.result.text;
+    } else if (result.text) {
+      return result.text;
+    } else if (result.data && result.data.text) {
+      return result.data.text;
+    }
+    
+    console.warn('[VolcEngine ASR] Unexpected response format:', JSON.stringify(result));
+    return '';
+  } catch (error: unknown) {
+    if (axios.isAxiosError(error)) {
+      const status = error.response?.status;
+      const responseData = error.response?.data;
+      console.error('[VolcEngine ASR] API Error:', status);
+      console.error('[VolcEngine ASR] Error Response:', responseData);
+    } else {
+      console.error('[VolcEngine ASR] Error:', error);
+    }
+    throw error;
+  }
+}
+
+/**
+ * 调用火山引擎语音合成API（流式，使用WebSocket）
+ * 参考文档：https://www.volcengine.com/docs/6561/1257584
+ * 
+ * 使用WebSocket客户端实现流式TTS合成
+ */
+async function* callVolcEngineTTS(
+  text: string,
+  appId: string,
+  accessToken: string,
+  speaker: string = TTS_SPEAKER
+): AsyncGenerator<Buffer, void, unknown> {
+  const client = new VolcEngineTTSClient(appId, accessToken, speaker);
+  
+  try {
+    // 初始化WebSocket连接
+    await client.init();
+    console.log('[VolcEngine TTS WS] Client initialized');
+    
+    // 使用Promise队列实现流式yield
+    const audioQueue: Buffer[] = [];
+    let finished = false;
+    let resolveNext: ((value: void) => void) | null = null;
+    let rejectNext: ((error: Error) => void) | null = null;
+    
+    // 监听音频数据
+    client.on('audio', (audio: Buffer) => {
+      audioQueue.push(audio);
+      if (resolveNext) {
+        resolveNext();
+        resolveNext = null;
+      }
+    });
+    
+    // 监听会话结束
+    client.on('sessionFinished', () => {
+      finished = true;
+      if (resolveNext) {
+        resolveNext();
+        resolveNext = null;
+      }
+    });
+    
+    // 监听错误
+    client.on('error', (error: Error) => {
+      finished = true;
+      if (rejectNext) {
+        rejectNext(error);
+        rejectNext = null;
+      }
+    });
+    
+    // 发送文本进行合成
+    await client.synthesize(text, true);
+    
+    // 流式yield音频数据
+    while (!finished || audioQueue.length > 0) {
+      if (audioQueue.length > 0) {
+        const chunk = audioQueue.shift()!;
+        yield chunk;
+      } else if (!finished) {
+        // 等待下一个音频块
+        await new Promise<void>((resolve, reject) => {
+          resolveNext = resolve;
+          rejectNext = reject;
+          // 超时保护（10秒）
+          setTimeout(() => {
+            if (resolveNext === resolve) {
+              resolveNext = null;
+              rejectNext = null;
+              if (audioQueue.length === 0 && finished) {
+                resolve();
+              } else {
+                reject(new Error('TTS timeout'));
+              }
+            }
+          }, 10000);
+        });
+      }
+    }
+    
+    // 关闭连接
+    await client.close();
+  } catch (error) {
+    console.error('[VolcEngine TTS WS] Error:', error);
+    await client.close().catch(() => {});
+    throw error;
+  }
+}
+
+/**
+ * 调用火山方舟LLM API（流式）
+ * 参考文档：https://www.volcengine.com/docs/82379/1298459
+ */
+async function* callVolcEngineLLM(
+  messages: Array<{ role: string; content: string }>,
+  endpointId: string,
+  apiKey: string
+): AsyncGenerator<string, void, unknown> {
+  // 火山方舟API调用
+  // 根据文档，endpoint_id作为model参数传递
+  const url = `${ARK_API_BASE}/chat/completions`;
+  
+  try {
+    const response = await axios.post(
+      url,
+      {
+        model: endpointId, // 使用endpoint_id作为model
+        messages: messages,
+        stream: true,
+        temperature: 0.7,
+        max_tokens: 4096
+      },
+      {
+        headers: {
+          'Authorization': `Bearer ${apiKey}`,
+          'Content-Type': 'application/json'
+        },
+        responseType: 'stream'
+      }
+    );
+    
+    // 解析SSE流
+    let buffer = '';
+    for await (const chunk of response.data) {
+      buffer += chunk.toString();
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+      
+      for (const line of lines) {
+        if (line.trim() === '') continue;
+        
+        // 处理SSE格式：data: {...}
+        if (line.startsWith('data: ')) {
+          const data = line.substring(6).trim();
+          if (data === '[DONE]') continue;
+          
+          try {
+            const json = JSON.parse(data);
+            // 支持多种响应格式
+            const content = json.choices?.[0]?.delta?.content || 
+                          json.choices?.[0]?.message?.content || 
+                          json.content || '';
+            if (content) {
+              yield content;
+            }
+          } catch (e) {
+            // 忽略解析错误，继续处理下一行
+            console.warn('[VolcEngine LLM] Failed to parse SSE data:', line);
+          }
+        } else if (line.startsWith('{')) {
+          // 直接JSON格式（非SSE）
+          try {
+            const json = JSON.parse(line);
+            const content = json.choices?.[0]?.delta?.content || 
+                          json.choices?.[0]?.message?.content || 
+                          json.content || '';
+            if (content) {
+              yield content;
+            }
+          } catch (e) {
+            // 忽略解析错误
+          }
+        }
+      }
+    }
+  } catch (error: unknown) {
+    if (axios.isAxiosError(error)) {
+      const status = error.response?.status;
+      const responseData = error.response?.data;
+      
+      // 尝试读取错误响应内容
+      let errorMessage = 'Unknown error';
+      if (responseData) {
+        if (typeof responseData === 'string') {
+          errorMessage = responseData;
+        } else if (typeof responseData.pipe === 'function') {
+          // 流式错误响应
+          const chunks: Buffer[] = [];
+          responseData.on('data', (chunk: Buffer) => chunks.push(chunk));
+          await new Promise<void>((resolve) => {
+            responseData.on('end', () => resolve());
+            responseData.on('error', () => resolve());
+          });
+          errorMessage = Buffer.concat(chunks).toString();
+        } else {
+          errorMessage = JSON.stringify(responseData);
+        }
+      }
+      
+      console.error('[VolcEngine LLM] API Error:', status);
+      console.error('[VolcEngine LLM] Error Response:', errorMessage);
+      console.error('[VolcEngine LLM] Request URL:', url);
+      console.error('[VolcEngine LLM] Endpoint ID:', endpointId);
+      
+      // 抛出更详细的错误信息
+      throw new Error(`VolcEngine LLM API Error (${status}): ${errorMessage}`);
+    } else {
+      console.error('[VolcEngine LLM] Error:', error);
+      throw error;
+    }
+  }
+}
+
+// SiliconFlow Configuration (保留作为fallback，待替换完成后可移除)
 // Using Kimi model which supports reasoning and tools better
 const SILICONFLOW_API_KEY = 'sk-sedikaywkisyertdnwzqbwgdncqndeqfjgrcutiirgbebfgk';
 
@@ -948,7 +1277,353 @@ class SiliconFlowAdapter extends OpenAIAdapter {
     }
 }
 
-const serviceAdapter = new SiliconFlowAdapter();
+// ==================== 火山方舟适配器 ====================
+/**
+ * 火山方舟LLM适配器
+ * 使用Doubao-pro-32k模型，支持工具调用
+ */
+class VolcEngineAdapter extends OpenAIAdapter {
+    constructor() {
+        // 创建一个虚拟的OpenAI客户端用于适配器接口
+        // 实际调用会使用callVolcEngineLLM函数
+        super({ 
+            openai: {
+                chat: {
+                    completions: {
+                        create: async () => {
+                            throw new Error('VolcEngineAdapter should use process() method directly');
+                        }
+                    }
+                }
+            } as any, 
+            model: LLM_ENDPOINT_ID || 'doubao-pro-32k' 
+        });
+    }
+
+    async process(request: any): Promise<any> {
+        const { messages, eventSource, actions } = request;
+        
+        console.log(`[VolcEngineAdapter] Processing request. Actions count: ${actions?.length || 0}`);
+
+        // 检查是否配置了火山方舟
+        const useVolcEngine = LLM_ENDPOINT_ID && ARK_API_KEY;
+        
+        if (!useVolcEngine) {
+            console.warn('[VolcEngineAdapter] VolcEngine not configured, falling back to SiliconFlow');
+            // Fallback to SiliconFlow
+            const fallbackAdapter = new SiliconFlowAdapter();
+            return fallbackAdapter.process(request);
+        }
+
+        // 消息格式转换（与SiliconFlowAdapter相同）
+        const openAIMessages = messages
+            .map((msg: any, index: number) => {
+                let role = 'user';
+                let content = msg.content;
+
+                if (msg.role === 'system') {
+                    role = 'system';
+                } else if (msg.role === 'assistant') {
+                    role = 'assistant';
+                } else if (msg.role === 'user') {
+                    role = 'user';
+                } else if (msg.type === 'TextMessage') {
+                    role = msg.role === 'assistant' ? 'assistant' : 'user';
+                } else if (msg.type === 'ActionExecutionMessage' || msg.type === 'ResultMessage') {
+                    return null;
+                }
+
+                if (typeof content !== 'string') {
+                    content = JSON.stringify(content || "");
+                }
+                
+                if (!content || content.trim() === '' || content === '{}' || content === 'null') {
+                    return null;
+                }
+
+                return { role, content };
+            })
+            .filter((msg: any) => msg !== null);
+
+        // 注入系统提示
+        if (openAIMessages.length > 0 && openAIMessages[0].role === 'system') {
+            openAIMessages[0].content = `${SYSTEM_PROMPT}\n\n${openAIMessages[0].content}`;
+        } else {
+            openAIMessages.unshift({ role: 'system', content: SYSTEM_PROMPT });
+        }
+
+        // 工具定义（与SiliconFlowAdapter相同）
+        const KNOWN_ACTION_SCHEMAS: Record<string, any> = {
+            navigateToPage: {
+                type: "object",
+                properties: {
+                    page: {
+                        type: "string",
+                        description: "The target page view. Options: dashboard, monitor, alert, patrol, broadcast. Also accepts Chinese: 综合态势/监控中心/预警中心/巡查治理/广播喊话"
+                    }
+                },
+                required: ["page"]
+            },
+            setDashboardMode: {
+                type: "object",
+                properties: {
+                    mode: {
+                        type: "string",
+                        description: "The dashboard center panel mode. Options: video-grid (监控墙), map (地图), ai-chat (AI助手)"
+                    }
+                },
+                required: ["mode"]
+            },
+            setEmergencyMode: {
+                type: "object",
+                properties: {
+                    active: {
+                        type: "boolean",
+                        description: "True to activate emergency mode, false to deactivate"
+                    }
+                },
+                required: ["active"]
+            },
+            toggleSidebar: {
+                type: "object",
+                properties: {},
+                description: "Toggle the navigation sidebar. No parameters needed."
+            },
+            configurePatrol: {
+                type: "object",
+                properties: {
+                    active: {
+                        type: "boolean",
+                        description: "Start or stop automated camera patrolling"
+                    },
+                    interval: {
+                        type: "number",
+                        description: "Time interval between camera switches in minutes"
+                    }
+                }
+            },
+            generateChart: {
+                type: "object",
+                properties: {
+                    dataSource: {
+                        type: "string",
+                        description: "数据源API端点",
+                        enum: ["/api/stats/cameras", "/api/stats/alerts", "/api/stats/patrol", "/api/stats/system"]
+                    },
+                    chartType: {
+                        type: "string",
+                        description: "图表类型",
+                        enum: ["line", "bar", "pie", "scatter", "radar"]
+                    },
+                    title: { type: "string", description: "图表标题（中文）" },
+                    description: { type: "string", description: "图表描述说明（可选）" },
+                    timeRange: {
+                        type: "string",
+                        enum: ["1d", "7d", "30d", "90d"]
+                    },
+                    dataMapping: { type: "object", description: "数据映射配置（可选）" }
+                },
+                required: ["dataSource", "chartType", "title"]
+            },
+            generateInsight: {
+                type: "object",
+                properties: {
+                    title: { type: "string", description: "分析总结的标题" },
+                    content: { type: "string", description: "Markdown格式的分析总结内容" },
+                    contentType: {
+                        type: "string",
+                        enum: ["markdown", "text", "html"]
+                    },
+                    layout: {
+                        type: "string",
+                        enum: ["half", "full"]
+                    }
+                },
+                required: ["title", "content"]
+            }
+        };
+
+        // 注意：火山方舟的工具调用支持可能需要不同的实现
+        // 当前先实现基础功能，工具调用功能待后续完善
+        // const tools = actions && actions.length > 0 ? actions.map(...) : undefined;
+
+        // 处理流式响应
+        eventSource.stream(async (eventStream$: any) => {
+            let startedTextMessage = false;
+            const messageId = `msg_${Date.now()}_${Math.random().toString(36).substring(7)}`;
+            
+            // 注意：火山方舟API的工具调用支持可能需要不同的实现方式
+            // 当前版本先实现基础文本流式响应，工具调用功能待完善
+            let fullMessageBuffer = '';
+            let ttsBuffer = '';
+            const TTS_THRESHOLD = 50;
+            const sessionId = `session_${Date.now()}_${Math.random().toString(36).substring(7)}`;
+
+            // 文本切分函数（与SiliconFlowAdapter相同）
+            const splitTextBySentences = (text: string, maxLength: number): string[] => {
+                if (text.length <= maxLength) return [text];
+                
+                const chunks: string[] = [];
+                let currentChunk = '';
+                
+                const sentenceEndings = /[。！？；\n]/;
+                const parts = text.split(sentenceEndings);
+                
+                for (const part of parts) {
+                    if ((currentChunk + part).length <= maxLength) {
+                        currentChunk += part;
+                    } else {
+                        if (currentChunk) chunks.push(currentChunk);
+                        currentChunk = part;
+                    }
+                }
+                if (currentChunk) chunks.push(currentChunk);
+                
+                return chunks.length > 0 ? chunks : [text];
+            };
+
+            const sendTTSChunk = async (text: string) => {
+                if (!text.trim()) return;
+                
+                try {
+                    const useVolcEngineTTS = TTS_ACCESS_TOKEN && TTS_APP_ID;
+                    if (useVolcEngineTTS) {
+                        let audioBuffer = Buffer.alloc(0);
+                        for await (const chunk of callVolcEngineTTS(text, TTS_APP_ID, TTS_ACCESS_TOKEN, TTS_SPEAKER)) {
+                            audioBuffer = Buffer.concat([audioBuffer, chunk]);
+                        }
+                        
+                        if (audioBuffer.length > 0) {
+                            audioEventEmitter.emit('audio', {
+                                sessionId,
+                                audio: audioBuffer,
+                                text: text,
+                                index: audioBuffers.get(sessionId)?.length || 0
+                            });
+                            
+                            if (!audioBuffers.has(sessionId)) {
+                                audioBuffers.set(sessionId, []);
+                            }
+                            audioBuffers.get(sessionId)!.push({
+                                audio: audioBuffer,
+                                text: text,
+                                index: audioBuffers.get(sessionId)!.length
+                            });
+                        }
+                    }
+                } catch (err) {
+                    console.error(`[VolcEngineAdapter TTS] Error:`, err);
+                }
+            };
+
+            try {
+                console.log("[VolcEngineAdapter] Requesting streaming completion from VolcEngine...");
+                console.log("[VolcEngineAdapter] Endpoint ID:", LLM_ENDPOINT_ID);
+                console.log("[VolcEngineAdapter] Messages count:", openAIMessages.length);
+                console.log("[VolcEngineAdapter] First message:", openAIMessages[0]?.role, openAIMessages[0]?.content?.substring(0, 100));
+
+                // 调用火山方舟LLM
+                let hasContent = false;
+                try {
+                    for await (const content of callVolcEngineLLM(openAIMessages, LLM_ENDPOINT_ID, ARK_API_KEY)) {
+                        hasContent = true;
+                        if (!startedTextMessage) {
+                            eventStream$.sendTextMessageStart({ messageId });
+                            startedTextMessage = true;
+                            
+                            eventStream$.sendTextMessageContent({
+                                messageId,
+                                content: `<!--AUDIO_SESSION:${sessionId}-->`
+                            });
+                        }
+                        
+                        eventStream$.sendTextMessageContent({
+                            messageId,
+                            content: content
+                        });
+                        
+                        fullMessageBuffer += content;
+                        ttsBuffer += content;
+                        
+                        if (ttsBuffer.length >= TTS_THRESHOLD) {
+                            const chunks = splitTextBySentences(ttsBuffer, TTS_THRESHOLD);
+                            for (let i = 0; i < chunks.length - 1; i++) {
+                                await sendTTSChunk(chunks[i]);
+                            }
+                            ttsBuffer = chunks.length > 0 ? chunks[chunks.length - 1] : '';
+                        }
+                    }
+                } catch (llmError: any) {
+                    console.error('[VolcEngineAdapter] LLM call error:', llmError);
+                    console.error('[VolcEngineAdapter] LLM error stack:', llmError.stack);
+                    throw llmError; // 重新抛出以便外层catch处理
+                }
+
+                // 发送剩余的TTS
+                if (ttsBuffer.trim()) {
+                    await sendTTSChunk(ttsBuffer);
+                }
+
+                // 检查是否收到任何内容
+                if (!hasContent) {
+                    console.warn('[VolcEngineAdapter] No content received from LLM');
+                    if (!startedTextMessage) {
+                        eventStream$.sendTextMessageStart({ messageId });
+                        startedTextMessage = true;
+                    }
+                    eventStream$.sendTextMessageContent({
+                        messageId,
+                        content: '抱歉，未能获取到响应内容。'
+                    });
+                }
+
+                // 发送完成事件
+                if (startedTextMessage) {
+                    eventStream$.sendTextMessageEnd({ messageId });
+                }
+                
+                audioEventEmitter.emit('complete', { sessionId });
+                eventStream$.complete();
+
+            } catch (err: any) {
+                console.error('[VolcEngineAdapter] Error:', err);
+                console.error('[VolcEngineAdapter] Error message:', err.message);
+                console.error('[VolcEngineAdapter] Error stack:', err.stack);
+                
+                if (!startedTextMessage) {
+                    try {
+                        eventStream$.sendTextMessageStart({ messageId: "error" });
+                        eventStream$.sendTextMessageContent({ 
+                            messageId: "error", 
+                            content: `Error: ${err.message || "Unknown error"}` 
+                        });
+                        eventStream$.sendTextMessageEnd({ messageId: "error" });
+                    } catch (streamError) {
+                        console.error('[VolcEngineAdapter] Failed to send error to stream:', streamError);
+                    }
+                }
+                
+                try {
+                    eventStream$.error(err);
+                } catch (streamError) {
+                    console.error('[VolcEngineAdapter] Failed to send error event:', streamError);
+                }
+            }
+        });
+
+        // 返回与SiliconFlowAdapter相同的格式
+        return {
+            threadId: request.threadId || "default_thread"
+        };
+    }
+}
+
+// 根据配置选择适配器
+const serviceAdapter = (LLM_ENDPOINT_ID && ARK_API_KEY) 
+    ? new VolcEngineAdapter() 
+    : new SiliconFlowAdapter();
+
+console.log(`[Service Adapter] Using ${(LLM_ENDPOINT_ID && ARK_API_KEY) ? 'VolcEngine' : 'SiliconFlow'} adapter`);
 
 // ==================== 实时音频推送 SSE ====================
 // GET /api/audio-stream/:sessionId
@@ -1026,7 +1701,7 @@ app.get('/api/audio-stream/:sessionId', (req, res) => {
 
 // ==================== 语音识别 API ====================
 // POST /api/speech-to-text
-// 使用 FunAudioLLM/SenseVoiceSmall 模型进行语音识别
+// 优先使用火山引擎ASR，如果未配置则fallback到SiliconFlow
 app.post('/api/speech-to-text', upload.single('audio'), async (req, res) => {
   try {
     if (!req.file) {
@@ -1045,21 +1720,38 @@ app.post('/api/speech-to-text', upload.single('audio'), async (req, res) => {
       return res.status(400).json({ error: 'Audio file is empty' });
     }
 
-    // 使用axios和form-data发送请求
+    // 检查是否配置了火山引擎ASR
+    const useVolcEngine = ASR_ACCESS_TOKEN && ASR_APP_ID;
+
+    if (useVolcEngine) {
+      console.log('[ASR] Using VolcEngine ASR API');
+      try {
+        const text = await callVolcEngineASR(req.file.buffer, ASR_APP_ID, ASR_ACCESS_TOKEN);
+        console.log('[ASR] VolcEngine recognition successful:', text);
+        res.json({ 
+          text: text,
+          language: 'zh'
+        });
+        return;
+      } catch (error: unknown) {
+        console.error('[ASR] VolcEngine API Error:', error);
+        // Fallback to SiliconFlow if VolcEngine fails
+        console.log('[ASR] Falling back to SiliconFlow...');
+      }
+    }
+
+    // Fallback to SiliconFlow
+    console.log('[ASR] Using SiliconFlow API (FunAudioLLM/SenseVoiceSmall)');
     const FormData = (await import('form-data')).default;
     const formData = new FormData();
     
-    // 将Buffer作为stream添加到formData
     formData.append('file', req.file.buffer, {
       filename: 'recording.webm',
       contentType: 'audio/webm'
     });
     formData.append('model', 'FunAudioLLM/SenseVoiceSmall');
 
-    console.log('[ASR] Sending request to SiliconFlow API with axios...');
-
     try {
-      // 使用axios发送请求（axios对form-data支持更好）
       const response = await axios.post(
         'https://api.siliconflow.cn/v1/audio/transcriptions',
         formData,
@@ -1073,7 +1765,7 @@ app.post('/api/speech-to-text', upload.single('audio'), async (req, res) => {
         }
       );
 
-      console.log('[ASR] Recognition successful:', response.data);
+      console.log('[ASR] SiliconFlow recognition successful:', response.data);
 
       res.json({ 
         text: response.data.text || '',
@@ -1082,7 +1774,7 @@ app.post('/api/speech-to-text', upload.single('audio'), async (req, res) => {
 
     } catch (error: unknown) {
       if (axios.isAxiosError(error) && error.response) {
-        console.error('[ASR] API Error:', error.response.status, error.response.data);
+        console.error('[ASR] SiliconFlow API Error:', error.response.status, error.response.data);
         return res.status(error.response.status).json({ 
           error: 'Speech recognition failed', 
           details: error.response.data
@@ -1219,8 +1911,7 @@ app.post('/api/complete-ai-speech', async (req, res) => {
 
 // ==================== 语音合成 API ====================
 // POST /api/text-to-speech
-// 使用 FunAudioLLM/CosyVoice2-0.5B 模型进行流式语音合成
-// 文档: https://docs.siliconflow.cn/cn/api-reference/audio/create-speech
+// 优先使用火山引擎TTS，如果未配置则fallback到SiliconFlow
 app.post('/api/text-to-speech', async (req, res) => {
   try {
     const { text } = req.body;
@@ -1231,7 +1922,31 @@ app.post('/api/text-to-speech', async (req, res) => {
 
     console.log('[TTS] Generating speech for text:', text.substring(0, 100));
 
-    // 根据硅基流动文档，调用TTS API
+    // 检查是否配置了火山引擎TTS
+    const useVolcEngine = TTS_ACCESS_TOKEN && TTS_APP_ID;
+
+    if (useVolcEngine) {
+      console.log('[TTS] Using VolcEngine TTS API');
+      try {
+        res.setHeader('Content-Type', 'audio/mpeg');
+        res.setHeader('Transfer-Encoding', 'chunked');
+
+        for await (const chunk of callVolcEngineTTS(text, TTS_APP_ID, TTS_ACCESS_TOKEN, TTS_SPEAKER)) {
+          res.write(chunk);
+        }
+
+        console.log('[TTS] VolcEngine streaming audio completed');
+        res.end();
+        return;
+      } catch (error: unknown) {
+        console.error('[TTS] VolcEngine API Error:', error);
+        // Fallback to SiliconFlow if VolcEngine fails
+        console.log('[TTS] Falling back to SiliconFlow...');
+      }
+    }
+
+    // Fallback to SiliconFlow
+    console.log('[TTS] Using SiliconFlow API (FunAudioLLM/CosyVoice2-0.5B)');
     const response = await fetch('https://api.siliconflow.cn/v1/audio/speech', {
       method: 'POST',
       headers: {
@@ -1240,11 +1955,11 @@ app.post('/api/text-to-speech', async (req, res) => {
       },
       body: JSON.stringify({
         model: 'FunAudioLLM/CosyVoice2-0.5B',
-        input: text, // 直接使用文本，不需要特殊格式（除非需要情感控制）
-        voice: 'FunAudioLLM/CosyVoice2-0.5B:diana', // 使用完整的voice格式
+        input: text,
+        voice: 'FunAudioLLM/CosyVoice2-0.5B:diana',
         response_format: 'mp3',
-        sample_rate: 32000, // 默认32000 Hz
-        stream: true, // 启用流式输出
+        sample_rate: 32000,
+        stream: true,
         speed: 1.0,
         gain: 0
       })
@@ -1252,9 +1967,8 @@ app.post('/api/text-to-speech', async (req, res) => {
 
     if (!response.ok) {
       const errorText = await response.text();
-      console.error('[TTS] API Error:', response.status, errorText);
+      console.error('[TTS] SiliconFlow API Error:', response.status, errorText);
       
-      // 尝试解析错误响应
       let errorDetails;
       try {
         errorDetails = JSON.parse(errorText);
@@ -1268,11 +1982,9 @@ app.post('/api/text-to-speech', async (req, res) => {
       });
     }
 
-    // 设置响应头为音频流
     res.setHeader('Content-Type', 'audio/mpeg');
     res.setHeader('Transfer-Encoding', 'chunked');
 
-    // 将音频流传递给客户端
     const reader = response.body?.getReader();
     if (reader) {
       const pump = async (): Promise<void> => {
@@ -1285,7 +1997,7 @@ app.post('/api/text-to-speech', async (req, res) => {
         return pump();
       };
       await pump();
-      console.log('[TTS] Streaming audio completed');
+      console.log('[TTS] SiliconFlow streaming audio completed');
     } else {
       res.status(500).json({ error: 'No response body from TTS API' });
     }
@@ -1316,6 +2028,25 @@ app.use('/copilotkit', (req, res, next) => {
 app.get('/', (req, res) => {
   res.send('BI Agent Copilot Runtime is running!');
 });
+
+// ==================== WebSocket服务器（实时语音通话） ====================
+import { VoiceCallWebSocketHandler } from './websocket-handler.js';
+
+// 如果配置了火山引擎，启动WebSocket服务器
+if (LLM_ENDPOINT_ID && ARK_API_KEY && TTS_APP_ID && TTS_ACCESS_TOKEN) {
+  const voiceCallHandler = new VoiceCallWebSocketHandler({
+    ASR_APP_ID,
+    ASR_ACCESS_TOKEN,
+    TTS_APP_ID,
+    TTS_ACCESS_TOKEN,
+    TTS_SPEAKER,
+    LLM_ENDPOINT_ID,
+    ARK_API_KEY
+  }, 8888);
+  console.log('[VoiceCall] WebSocket server initialized on port 8888');
+} else {
+  console.log('[VoiceCall] WebSocket server not started (missing configuration)');
+}
 
 app.listen(port, () => {
   console.log(`Copilot Runtime running at http://localhost:${port}`);

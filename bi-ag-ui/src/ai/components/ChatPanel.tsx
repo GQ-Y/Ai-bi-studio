@@ -1,11 +1,12 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { useCopilotChat } from "@copilotkit/react-core";
 import { Role, TextMessage } from "@copilotkit/runtime-client-gql";
-import { Send, User, Bot, Mic, MicOff, Volume2 } from 'lucide-react';
+import { Send, User, Bot, Mic, MicOff, Volume2, Phone, PhoneOff } from 'lucide-react';
 import { motion } from 'framer-motion';
 import ReactMarkdown from 'react-markdown';
 import rehypeRaw from 'rehype-raw';
 import { useVoiceRecorder } from '../hooks/useVoiceRecorder';
+import { useRealtimeVoiceCall } from '../hooks/useRealtimeVoiceCall';
 import { speechToText, connectAudioStream } from '../services/voiceService';
 import { useAppStore } from '../../store';
 
@@ -32,13 +33,27 @@ export const ChatPanel: React.FC = () => {
   }, [chartConfigs, isChartModalOpen]);
 
   const [inputValue, setInputValue] = useState('');
+  const [realtimeMode, setRealtimeMode] = useState(false); // 实时语音通话模式
   
-  // 语音功能状态
+  // 传统语音功能状态（录音-识别-发送）
   const { isRecording, startRecording, stopRecording, cancelRecording, error: recorderError } = useVoiceRecorder();
   const [isProcessingVoice, setIsProcessingVoice] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [voiceError, setVoiceError] = useState<string | null>(null);
   const [autoPlayVoice, setAutoPlayVoice] = useState(true); // 自动播放AI回复的语音
+  
+  // 实时语音通话功能状态
+  const {
+    isConnected: isRealtimeConnected,
+    isRecording: isRealtimeRecording,
+    isPlaying: isRealtimePlaying,
+    connect: connectRealtime,
+    disconnect: disconnectRealtime,
+    startRecording: startRealtimeRecording,
+    stopRecording: stopRealtimeRecording,
+    recognizedText: realtimeRecognizedText,
+    error: realtimeError,
+  } = useRealtimeVoiceCall('ws://localhost:8888');
   const audioQueueRef = useRef<Blob[]>([]); // 音频队列
   const isPlayingRef = useRef<boolean>(false); // 是否正在播放
   const audioStreamCleanupRef = useRef<(() => void) | null>(null); // SSE连接清理函数
@@ -101,7 +116,34 @@ export const ChatPanel: React.FC = () => {
     }));
   };
 
-  // 处理语音输入
+  // 切换实时语音通话模式
+  const handleToggleRealtimeMode = async () => {
+    if (realtimeMode) {
+      // 关闭实时模式
+      disconnectRealtime();
+      setRealtimeMode(false);
+    } else {
+      // 开启实时模式
+      try {
+        await connectRealtime();
+        setRealtimeMode(true);
+      } catch (err) {
+        console.error('连接实时语音通话失败:', err);
+        setVoiceError('连接实时语音通话失败');
+      }
+    }
+  };
+
+  // 处理实时语音通话录音
+  const handleRealtimeRecording = async () => {
+    if (isRealtimeRecording) {
+      stopRealtimeRecording();
+    } else {
+      await startRealtimeRecording();
+    }
+  };
+
+  // 处理传统语音输入（录音-识别-发送）
   const handleVoiceInput = async () => {
     if (isRecording) {
       // 停止录音并转换为文本
@@ -411,33 +453,97 @@ export const ChatPanel: React.FC = () => {
       {/* 输入框区域 */}
       <div className="mt-4 space-y-2">
         {/* 错误提示 */}
-        {(voiceError || recorderError) && (
+        {(voiceError || recorderError || realtimeError) && (
           <motion.div
             initial={{ opacity: 0, y: -10 }}
             animate={{ opacity: 1, y: 0 }}
             className="bg-red-500/10 border border-red-500/30 rounded-lg px-3 py-2 text-red-400 text-xs"
           >
-            {voiceError || recorderError}
+            {voiceError || recorderError || realtimeError}
           </motion.div>
         )}
 
         {/* 语音功能控制条 */}
-        <div className="flex items-center justify-between px-2">
-          <div className="flex items-center gap-2">
+        <div className="flex items-center justify-between px-2 flex-wrap gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
+            {/* 实时语音通话模式切换按钮 */}
             <button
-              onClick={() => setAutoPlayVoice(!autoPlayVoice)}
+              onClick={handleToggleRealtimeMode}
               className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs transition-all ${
-                autoPlayVoice 
-                  ? 'bg-blue-500/20 text-blue-400 border border-blue-500/30' 
+                realtimeMode 
+                  ? 'bg-green-500/20 text-green-400 border border-green-500/30' 
                   : 'bg-slate-800/50 text-slate-400 border border-white/10 hover:border-white/20'
               }`}
-              title={autoPlayVoice ? '关闭语音播放' : '开启语音播放'}
+              title={realtimeMode ? '关闭实时语音通话' : '开启实时语音通话'}
             >
-              <Volume2 size={14} />
-              <span>{autoPlayVoice ? '语音播放:开' : '语音播放:关'}</span>
+              {realtimeMode ? (
+                <>
+                  <PhoneOff size={14} />
+                  <span>实时通话:开</span>
+                  {isRealtimeConnected && (
+                    <div className="w-1.5 h-1.5 bg-green-500 rounded-full animate-pulse" />
+                  )}
+                </>
+              ) : (
+                <>
+                  <Phone size={14} />
+                  <span>实时通话</span>
+                </>
+              )}
             </button>
 
-            {isSpeaking && (
+            {/* 实时模式下的录音控制 */}
+            {realtimeMode && isRealtimeConnected && (
+              <button
+                onClick={handleRealtimeRecording}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs transition-all ${
+                  isRealtimeRecording
+                    ? 'bg-red-500/20 text-red-400 border border-red-500/30'
+                    : 'bg-blue-500/20 text-blue-400 border border-blue-500/30'
+                }`}
+                title={isRealtimeRecording ? '停止实时录音' : '开始实时录音'}
+              >
+                {isRealtimeRecording ? (
+                  <>
+                    <MicOff size={14} />
+                    <span>实时录音中</span>
+                    <div className="w-1.5 h-1.5 bg-red-500 rounded-full animate-pulse" />
+                  </>
+                ) : (
+                  <>
+                    <Mic size={14} />
+                    <span>开始录音</span>
+                  </>
+                )}
+              </button>
+            )}
+
+            {/* 实时模式下的播放状态 */}
+            {realtimeMode && isRealtimePlaying && (
+              <div className="flex items-center gap-1.5 text-blue-400 text-xs px-3 py-1.5 bg-blue-500/20 border border-blue-500/30 rounded-full">
+                <Volume2 size={14} className="animate-pulse" />
+                <span>AI正在回复...</span>
+              </div>
+            )}
+
+            {/* 传统语音播放控制（非实时模式） */}
+            {!realtimeMode && (
+              <button
+                onClick={() => setAutoPlayVoice(!autoPlayVoice)}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs transition-all ${
+                  autoPlayVoice 
+                    ? 'bg-blue-500/20 text-blue-400 border border-blue-500/30' 
+                    : 'bg-slate-800/50 text-slate-400 border border-white/10 hover:border-white/20'
+                }`}
+                title={autoPlayVoice ? '关闭语音播放' : '开启语音播放'}
+              >
+                <Volume2 size={14} />
+                <span>{autoPlayVoice ? '语音播放:开' : '语音播放:关'}</span>
+              </button>
+            )}
+
+            {/* 传统模式播放状态 */}
+            {!realtimeMode && isSpeaking && (
               <div className="flex items-center gap-1 text-blue-400 text-xs">
                 <div className="w-1 h-1 bg-blue-400 rounded-full animate-pulse" />
                 <span>播放中...</span>
@@ -445,10 +551,19 @@ export const ChatPanel: React.FC = () => {
             )}
           </div>
 
-          {isRecording && (
+          {/* 传统录音状态（非实时模式） */}
+          {!realtimeMode && isRecording && (
             <div className="flex items-center gap-2 text-red-400 text-xs animate-pulse">
               <div className="w-2 h-2 bg-red-500 rounded-full" />
               <span>录音中</span>
+            </div>
+          )}
+
+          {/* 实时模式识别结果显示 */}
+          {realtimeMode && realtimeRecognizedText && (
+            <div className="px-3 py-1.5 bg-slate-800/50 text-slate-300 rounded-full text-xs border border-white/10">
+              <span className="text-slate-400">识别: </span>
+              <span>{realtimeRecognizedText}</span>
             </div>
           )}
         </div>
@@ -460,30 +575,55 @@ export const ChatPanel: React.FC = () => {
             value={inputValue}
             onChange={(e) => setInputValue(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder={isRecording ? "录音中... 点击麦克风停止" : "输入指令或点击麦克风说话..."} 
-            disabled={isLoading || isProcessingVoice || isRecording}
+            placeholder={
+              realtimeMode 
+                ? (isRealtimeRecording ? "实时通话中... 点击麦克风停止" : "实时通话模式 - 点击麦克风开始说话...")
+                : (isRecording ? "录音中... 点击麦克风停止" : "输入指令或点击麦克风说话...")
+            } 
+            disabled={isLoading || isProcessingVoice || isRecording || (realtimeMode && isRealtimeRecording)}
             className="w-full bg-slate-900/50 border border-white/10 rounded-full pl-6 pr-24 py-4 text-white placeholder-slate-400 focus:outline-none focus:border-blue-400/50 focus:bg-slate-900/80 transition-all backdrop-blur-md disabled:opacity-50 disabled:cursor-not-allowed"
           />
           
-          {/* 语音输入按钮 */}
-          <button 
-            onClick={handleVoiceInput}
-            disabled={isLoading || isProcessingVoice}
-            className={`absolute right-14 top-1/2 -translate-y-1/2 p-2 rounded-full text-white transition-all shadow-lg disabled:opacity-50 disabled:cursor-not-allowed ${
-              isRecording 
-                ? 'bg-red-500 hover:bg-red-400 shadow-red-500/30 animate-pulse' 
-                : 'bg-blue-500/80 hover:bg-blue-500 shadow-blue-500/20'
-            }`}
-            title={isRecording ? "停止录音" : "开始录音"}
-          >
-            {isProcessingVoice ? (
-              <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" />
-            ) : isRecording ? (
-              <MicOff size={18} />
-            ) : (
-              <Mic size={18} />
-            )}
-          </button>
+          {/* 语音输入按钮（实时模式或传统模式） */}
+          {realtimeMode ? (
+            // 实时模式：显示实时录音按钮
+            <button 
+              onClick={handleRealtimeRecording}
+              disabled={isLoading || !isRealtimeConnected}
+              className={`absolute right-14 top-1/2 -translate-y-1/2 p-2 rounded-full text-white transition-all shadow-lg disabled:opacity-50 disabled:cursor-not-allowed ${
+                isRealtimeRecording 
+                  ? 'bg-red-500 hover:bg-red-400 shadow-red-500/30 animate-pulse' 
+                  : 'bg-green-500/80 hover:bg-green-500 shadow-green-500/20'
+              }`}
+              title={isRealtimeRecording ? "停止实时录音" : "开始实时录音"}
+            >
+              {isRealtimeRecording ? (
+                <MicOff size={18} />
+              ) : (
+                <Mic size={18} />
+              )}
+            </button>
+          ) : (
+            // 传统模式：显示传统录音按钮
+            <button 
+              onClick={handleVoiceInput}
+              disabled={isLoading || isProcessingVoice}
+              className={`absolute right-14 top-1/2 -translate-y-1/2 p-2 rounded-full text-white transition-all shadow-lg disabled:opacity-50 disabled:cursor-not-allowed ${
+                isRecording 
+                  ? 'bg-red-500 hover:bg-red-400 shadow-red-500/30 animate-pulse' 
+                  : 'bg-blue-500/80 hover:bg-blue-500 shadow-blue-500/20'
+              }`}
+              title={isRecording ? "停止录音" : "开始录音"}
+            >
+              {isProcessingVoice ? (
+                <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+              ) : isRecording ? (
+                <MicOff size={18} />
+              ) : (
+                <Mic size={18} />
+              )}
+            </button>
+          )}
 
           {/* 发送按钮 */}
           <button 

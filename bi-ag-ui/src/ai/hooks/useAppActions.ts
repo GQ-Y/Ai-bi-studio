@@ -3,8 +3,6 @@ import { useAppStore } from "../../store";
 import type { PageView, CenterMode } from "../../store";
 
 export const useAppActions = () => {
-  console.log('[useAppActions] Hook initializing...');
-  
   const { 
     setCurrentView, 
     setCenterMode, 
