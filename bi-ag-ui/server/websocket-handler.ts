@@ -563,18 +563,20 @@ class VoiceCallService {
         payload: { sentence: recognizedText }
       };
 
-      // 调用LLM生成回复
+      // 调用LLM生成回复（流式）
       console.log(`[LLM调用] 发送给豆包: "${recognizedText}"`);
       this.historyMessages.push({ role: 'user', content: recognizedText });
-      const llmResponse = await this.generateLLMResponse();
       
-      if (llmResponse && llmResponse.trim()) {
-        console.log(`[LLM响应] 豆包回复: "${llmResponse}"`);
-        // 发送TTS合成
-        console.log(`[TTS合成] 开始合成语音: "${llmResponse.substring(0, 50)}${llmResponse.length > 50 ? '...' : ''}"`);
-        yield* this.generateTTSResponse(llmResponse);
-        console.log(`[TTS合成] 语音合成完成`);
-      } else {
+      // 使用流式LLM+TTS，边接收边合成
+      let hasResponse = false;
+      for await (const event of this.generateStreamingLLMAndTTS()) {
+        yield event;
+        if (event.event === TTS_DONE) {
+          hasResponse = true;
+        }
+      }
+      
+      if (!hasResponse) {
         console.warn(`[LLM响应] ⚠️ 豆包返回空回复`);
       }
     } catch (error) {
@@ -585,6 +587,204 @@ class VoiceCallService {
     }
   }
 
+
+  /**
+   * 流式生成LLM回复并实时进行TTS合成
+   * 边接收LLM内容边合成语音，减少等待时间
+   */
+  private async *generateStreamingLLMAndTTS(): AsyncGenerator<WebEvent, void, unknown> {
+    try {
+      const ARK_API_BASE = 'https://ark.cn-beijing.volces.com/api/v3';
+      const url = `${ARK_API_BASE}/chat/completions`;
+      
+      const response = await axios.post(
+        url,
+        {
+          model: this.config.LLM_ENDPOINT_ID,
+          messages: this.historyMessages,
+          stream: true,
+          temperature: 0.7,
+          max_tokens: 4096
+        },
+        {
+          headers: {
+            'Authorization': `Bearer ${this.config.ARK_API_KEY}`,
+            'Content-Type': 'application/json'
+          },
+          responseType: 'stream'
+        }
+      );
+      
+      let fullResponse = '';
+      let buffer = '';
+      let sentenceBuffer = ''; // 累积的句子缓冲区
+      
+      console.log(`[TTS合成] 开始流式合成语音`);
+      
+      for await (const chunk of response.data) {
+        buffer += chunk.toString();
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+        
+        for (const line of lines) {
+          if (line.trim() === '') continue;
+          
+          if (line.startsWith('data: ')) {
+            const data = line.substring(6).trim();
+            if (data === '[DONE]') {
+              // 处理剩余的句子缓冲区
+              if (sentenceBuffer.trim()) {
+                yield* this.generateTTSForSentence(sentenceBuffer.trim());
+                sentenceBuffer = '';
+              }
+              continue;
+            }
+            
+            try {
+              const json = JSON.parse(data);
+              const content = json.choices?.[0]?.delta?.content || 
+                            json.choices?.[0]?.message?.content || 
+                            json.content || '';
+              if (content) {
+                fullResponse += content;
+                sentenceBuffer += content;
+                
+                // 检查是否有完整的句子（以句号、感叹号、问号、分号或换行符结尾）
+                const sentenceMatch = sentenceBuffer.match(/^(.+?[。！？；\n])/);
+                if (sentenceMatch) {
+                  const completeSentence = sentenceMatch[1].trim();
+                  sentenceBuffer = sentenceBuffer.substring(sentenceMatch[0].length);
+                  
+                  // 立即合成这个句子
+                  if (completeSentence) {
+                    yield* this.generateTTSForSentence(completeSentence);
+                  }
+                } else if (sentenceBuffer.length >= 20) {
+                  // 如果缓冲区超过20个字符还没有句子结束符，也进行合成（避免等待太久）
+                  // 尝试在逗号、顿号处分割
+                  const commaMatch = sentenceBuffer.match(/^(.+?[，、])/);
+                  if (commaMatch) {
+                    const partialSentence = commaMatch[1].trim();
+                    sentenceBuffer = sentenceBuffer.substring(commaMatch[0].length);
+                    if (partialSentence) {
+                      yield* this.generateTTSForSentence(partialSentence);
+                    }
+                  }
+                }
+              }
+            } catch (e) {
+              // 忽略解析错误
+            }
+          }
+        }
+      }
+      
+      // 处理最后剩余的文本（可能没有句子结束符）
+      if (sentenceBuffer.trim()) {
+        yield* this.generateTTSForSentence(sentenceBuffer.trim());
+        sentenceBuffer = '';
+      }
+      
+      // 保存完整回复到历史记录
+      if (fullResponse) {
+        this.historyMessages.push({ role: 'assistant', content: fullResponse });
+        console.log(`[LLM响应] 豆包完整回复: "${fullResponse}"`);
+      }
+      
+      // 发送完成事件
+      yield {
+        event: TTS_DONE,
+        payload: {}
+      };
+      console.log(`[TTS合成] 流式语音合成完成`);
+    } catch (error) {
+      console.error(`[LLM调用] ✗ LLM调用失败:`, error instanceof Error ? error.message : error);
+      yield {
+        event: BOT_ERROR,
+        payload: { message: 'LLM调用失败' }
+      };
+    }
+  }
+
+  /**
+   * 为单个句子生成TTS
+   */
+  private async *generateTTSForSentence(sentence: string): AsyncGenerator<WebEvent, void, unknown> {
+    if (!sentence.trim()) {
+      return;
+    }
+
+    console.log(`[TTS合成] 合成句子: "${sentence}"`);
+    
+    // 发送句子开始事件
+    yield {
+      event: TTS_SENTENCE_START,
+      payload: { sentence: sentence.trim() }
+    };
+
+    // 为每个句子创建新的TTS客户端实例
+    const sentenceTTSClient = new VolcEngineTTSClient(
+      this.config.TTS_APP_ID,
+      this.config.TTS_ACCESS_TOKEN,
+      this.config.TTS_SPEAKER
+    );
+    
+    // 保存当前TTS客户端，以便被打断时关闭
+    this.currentTTSClient = sentenceTTSClient;
+    
+    try {
+      await sentenceTTSClient.init();
+      
+      // 合成语音
+      const audioBuffer: Buffer[] = [];
+      
+      // 收集音频数据
+      const audioPromise = new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          reject(new Error('TTS timeout'));
+        }, 10000);
+
+        sentenceTTSClient.on('audio', (audio: Buffer) => {
+          audioBuffer.push(audio);
+        });
+
+        sentenceTTSClient.once('sessionFinished', () => {
+          clearTimeout(timeout);
+          resolve();
+        });
+
+        sentenceTTSClient.once('error', (error: Error) => {
+          clearTimeout(timeout);
+          reject(error);
+        });
+      });
+
+      // 发送合成请求
+      await sentenceTTSClient.synthesize(sentence.trim(), true);
+      
+      // 等待音频数据收集完成
+      await audioPromise;
+
+      // 发送音频数据
+      if (audioBuffer.length > 0) {
+        const combinedAudio = Buffer.concat(audioBuffer);
+        yield {
+          event: TTS_SENTENCE_END,
+          data: combinedAudio
+        };
+      }
+      
+      await sentenceTTSClient.close();
+      if (this.currentTTSClient === sentenceTTSClient) {
+        this.currentTTSClient = null;
+      }
+    } catch (error) {
+      await sentenceTTSClient.close().catch(() => {});
+      if (this.currentTTSClient === sentenceTTSClient) {
+        this.currentTTSClient = null;
+      }
+    }
+  }
 
   private async generateLLMResponse(): Promise<string> {
     try {
